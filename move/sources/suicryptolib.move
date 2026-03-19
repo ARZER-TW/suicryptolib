@@ -1,9 +1,2 @@
-/*
-/// Module: suicryptolib
-module suicryptolib::suicryptolib;
-*/
-
-// For Move coding conventions, see
-// https://docs.sui.io/concepts/sui-move-concepts/conventions
-
-
+// SuiCryptoLib - Cryptographic primitives for Sui
+// This file intentionally left minimal. Each module is in its own file.
