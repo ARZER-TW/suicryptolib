@@ -1,18 +1,20 @@
 {
-  "name": "sdk",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
-  "directories": {
-    "test": "test"
-  },
+  "name": "@suicryptolib/sdk",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for SuiCryptoLib - cryptographic primitives for Sui",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "build": "tsc",
+    "test": "node --test test/*.test.mjs"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "keywords": ["sui", "zk", "groth16", "pedersen", "merkle", "poseidon"],
+  "license": "MIT",
   "dependencies": {
     "circomlibjs": "^0.1.7"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
   }
 }
