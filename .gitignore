@@ -1,0 +1,14 @@
+node_modules/
+target/
+build/
+*.ptau
+*.zkey
+*.wasm
+*.wtns
+*.sym
+*.r1cs
+sui_format.json
+proof.json
+public.json
+input.json
+.env
