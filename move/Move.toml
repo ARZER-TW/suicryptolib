@@ -1,7 +1,7 @@
 [package]
 name = "suicryptolib"
 edition = "2024.beta"
-published-at = "0x738433a8c905c57314cd2a9f8f4a2eb254cf45958d1694e9f0d9a7dc35a09490"
+published-at = "0xd8ad089847187cbaa15da503e8892d5e3f0a2acd6cad1aff7be05bf0c127cf02"
 
 [dependencies]
 Sui = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/sui-framework", rev = "framework/testnet" }
