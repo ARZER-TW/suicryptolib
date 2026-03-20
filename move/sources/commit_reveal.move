@@ -12,9 +12,9 @@
 /// 4. After reveal_deadline, anyone calls finalize() to settle deposits
 ///
 /// Participants who commit but don't reveal forfeit their deposit.
-#[allow(lint(self_transfer))]
+#[allow(lint(self_transfer), unused_variable)]
 module suicryptolib::commit_reveal {
-    use sui::clock::Clock;
+    use sui::clock::{Self, Clock};
     use sui::coin::{Self, Coin};
     use sui::sui::SUI;
     use sui::balance::{Self, Balance};

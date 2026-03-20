@@ -7,9 +7,9 @@
 ///
 /// Privacy: during COMMIT phase, nobody knows any bid amounts.
 /// Fairness: deposit mechanism prevents commit-without-reveal griefing.
-#[allow(lint(self_transfer))]
+#[allow(lint(self_transfer), unused_variable, unused_const)]
 module sealed_auction::auction {
-    use sui::clock::Clock;
+    use sui::clock::{Self, Clock};
     use sui::coin::{Self, Coin};
     use sui::sui::SUI;
     use sui::balance::{Self, Balance};
