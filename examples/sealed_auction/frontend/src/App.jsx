@@ -358,7 +358,7 @@ function BidPanel({ auctionId, minDeposit, onSuccess }) {
       // Step 4: Save secrets locally for reveal phase
       saveBidSecret(auctionId, amount, bytesToHex(salt));
 
-      setStatus(`出价已提交! 金额 ${amount} SUI 已密封。`);
+      setStatus(`出价已提交! 金额 ${amount} 已密封。\n承诺哈希: ${hashHex.substring(0, 20)}...`);
       setAmount("");
       onSuccess();
     } catch (err) {
@@ -417,12 +417,36 @@ function RevealPanel({ auctionId, bids, onSuccess }) {
 
   const handleReveal = async () => {
     if (!mySecret) return;
-    setStatus("请在钱包中签名揭示交易...");
+
+    // Pre-flight: recompute hash locally to verify it matches commitment
+    const valueBytes = new TextEncoder().encode(mySecret.amount);
+    const saltBytes = hexToBytes(mySecret.saltHex);
+    const data = new Uint8Array([...valueBytes, ...saltBytes]);
+    const recomputedHash = await createHash(data);
+
+    // Debug: show what we're about to send
+    const debugInfo = [
+      `amount: "${mySecret.amount}"`,
+      `value bytes: [${Array.from(valueBytes).join(',')}]`,
+      `salt hex: ${mySecret.saltHex.substring(0, 16)}...`,
+      `salt length: ${saltBytes.length}`,
+      `recomputed hash: ${recomputedHash.substring(0, 16)}...`,
+    ].join('\n');
+
+    // Check if commitment on-chain matches
+    if (myBid?.commitmentHash) {
+      const onChainHex = Array.isArray(myBid.commitmentHash)
+        ? myBid.commitmentHash.map(b => b.toString(16).padStart(2, '0')).join('')
+        : String(myBid.commitmentHash);
+      if (onChainHex !== recomputedHash) {
+        setStatus(`错误: 本地重算的哈希与链上承诺不匹配!\n链上: ${onChainHex.substring(0, 20)}...\n本地: ${recomputedHash.substring(0, 20)}...\n\n调试信息:\n${debugInfo}`);
+        return;
+      }
+    }
+
+    setStatus("哈希验证通过，请在钱包中签名揭示交易...");
 
     try {
-      const valueBytes = new TextEncoder().encode(mySecret.amount);
-      const saltBytes = hexToBytes(mySecret.saltHex);
-
       await revealBid({
         auctionId,
         valueBytes,
@@ -466,9 +490,9 @@ function RevealPanel({ auctionId, bids, onSuccess }) {
         <p className="text-sm text-zinc-500">您没有待揭示的出价。</p>
       )}
       {status && (
-        <p className={`text-xs mt-2 ${status.startsWith("错误") ? "text-red-400" : "text-cyan-400"}`}>
+        <pre className={`text-xs mt-2 whitespace-pre-wrap ${status.startsWith("错误") ? "text-red-400" : "text-cyan-400"}`}>
           {status}
-        </p>
+        </pre>
       )}
     </div>
   );
