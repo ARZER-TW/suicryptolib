@@ -203,12 +203,34 @@ export function useAuctionState(auctionId) {
 
       if (obj.data?.content?.fields) {
         const f = obj.data.content.fields;
-        setAuction({
+        const chainPhase = Number(f.phase);
+          const commitDeadline = parseInt(f.commit_deadline, 10);
+          const revealDeadline = parseInt(f.reveal_deadline, 10);
+          const settled = f.settled;
+
+          // Compute effective phase from local time, because the chain
+          // only updates phase lazily (on the next reveal_bid/settle call).
+          let effectivePhase = chainPhase;
+          if (!settled) {
+            const now = Date.now();
+            if (now <= commitDeadline) {
+              effectivePhase = 0; // COMMIT
+            } else if (now <= revealDeadline) {
+              effectivePhase = 1; // REVEAL
+            } else {
+              effectivePhase = 2; // ready to settle (or settled)
+            }
+          } else {
+            effectivePhase = 2;
+          }
+
+          setAuction({
           itemName: decodeBytes(f.item_name),
           creator: f.creator,
-          phase: Number(f.phase),
-          commitDeadline: parseInt(f.commit_deadline, 10),
-          revealDeadline: parseInt(f.reveal_deadline, 10),
+          phase: effectivePhase,
+          chainPhase,
+          commitDeadline,
+          revealDeadline,
           minDeposit: parseInt(f.min_deposit, 10),
           bidCount: f.bids?.length || 0,
           bids: (f.bids || []).map((b) => ({
@@ -220,7 +242,7 @@ export function useAuctionState(auctionId) {
           })),
           winner: f.winner,
           winningAmount: parseInt(f.winning_amount, 10),
-          settled: f.settled,
+          settled,
         });
       }
     } catch (err) {

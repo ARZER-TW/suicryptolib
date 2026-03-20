@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useEffect } from "react";
 import { ConnectButton, useCurrentAccount } from "@mysten/dapp-kit";
 import { createHash, randomBytes, hexToBytes, bytesToHex } from "./crypto-utils";
 import {
@@ -277,12 +277,8 @@ function AuctionView({ auctionId, onBack }) {
       {/* Phase Bar */}
       <PhaseBar phase={auction.phase} />
 
-      {/* Deadlines */}
-      <div className="flex gap-4 text-xs text-zinc-500">
-        <span>承诺截止: {new Date(auction.commitDeadline).toLocaleTimeString("zh-CN")}</span>
-        <span>揭示截止: {new Date(auction.revealDeadline).toLocaleTimeString("zh-CN")}</span>
-        <span>出价数: {auction.bidCount}</span>
-      </div>
+      {/* Deadlines + Countdown */}
+      <DeadlineInfo auction={auction} />
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Left: Actions */}
@@ -293,10 +289,18 @@ function AuctionView({ auctionId, onBack }) {
           {auction.phase === PHASE_REVEAL && (
             <RevealPanel auctionId={auctionId} bids={auction.bids} onSuccess={refresh} />
           )}
-          {auction.phase === PHASE_SETTLED && (
+          {auction.phase === PHASE_SETTLED && !auction.settled && (
+            <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-6">
+              <h2 className="text-lg font-semibold mb-2 text-zinc-300">揭示阶段已截止</h2>
+              <p className="text-sm text-zinc-400 mb-4">
+                所有出价揭示时间已结束。点击下方按钮结算拍卖，确定赢家。
+              </p>
+            </div>
+          )}
+          {auction.settled && (
             <SettledPanel auction={auction} />
           )}
-          {auction.phase === PHASE_REVEAL && (
+          {!auction.settled && auction.phase === PHASE_SETTLED && (
             <SettleButton auctionId={auctionId} onSuccess={refresh} />
           )}
         </div>
@@ -526,7 +530,7 @@ function SettledPanel({ auction }) {
           <div>
             <p className="text-xs text-zinc-400 font-mono break-all">{auction.winner}</p>
             <p className="text-emerald-400 text-2xl font-bold">
-              {auction.winningAmount / 1_000_000_000} SUI
+              {auction.winningAmount} SUI
             </p>
           </div>
         </div>
@@ -567,7 +571,7 @@ function OnChainState({ auction }) {
               </div>
               <div className="font-mono text-xs text-zinc-500 break-all">
                 {bid.revealed ? (
-                  <span className="text-emerald-400">{bid.revealedAmount} SUI</span>
+                  <span className="text-emerald-400">{bid.revealedAmount}</span>
                 ) : (
                   <>
                     <span className="text-zinc-600">commitment: </span>
@@ -581,6 +585,41 @@ function OnChainState({ auction }) {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+// --- Deadline Info ---
+
+function DeadlineInfo({ auction }) {
+  const [now, setNow] = useState(Date.now());
+
+  // Update every second for countdown
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const formatRemaining = (deadline) => {
+    const diff = deadline - now;
+    if (diff <= 0) return "已截止";
+    const mins = Math.floor(diff / 60000);
+    const secs = Math.floor((diff % 60000) / 1000);
+    return `${mins}:${secs.toString().padStart(2, "0")}`;
+  };
+
+  const commitTime = new Date(auction.commitDeadline).toLocaleTimeString("zh-CN");
+  const revealTime = new Date(auction.revealDeadline).toLocaleTimeString("zh-CN");
+
+  return (
+    <div className="flex flex-wrap gap-4 text-xs text-zinc-500">
+      <span className={auction.phase === 0 ? "text-cyan-400" : ""}>
+        承诺截止: {commitTime} ({formatRemaining(auction.commitDeadline)})
+      </span>
+      <span className={auction.phase === 1 ? "text-cyan-400" : ""}>
+        揭示截止: {revealTime} ({formatRemaining(auction.revealDeadline)})
+      </span>
+      <span>出价数: {auction.bidCount}</span>
     </div>
   );
 }
