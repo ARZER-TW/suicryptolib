@@ -9,9 +9,9 @@ import {
   useAuctionState,
 } from "./use-auction";
 import { DEFAULT_MIN_DEPOSIT_MIST, PHASE_COMMIT, PHASE_REVEAL, PHASE_SETTLED } from "./config";
-import { XRayPanel, createStepTracker } from "./components/XRayPanel";
+import { OperationDetail } from "./components/OperationDetail";
 import { PrivacyToggle } from "./components/PrivacyToggle";
-import { SuiscanLink, RawChainData } from "./components/ChainDataView";
+import { SuiscanLink, AnnotatedChainData } from "./components/ChainDataView";
 import { ModuleTag } from "./components/ModuleTag";
 import "./index.css";
 
@@ -325,8 +325,7 @@ function BidPanel({ auctionId, minDeposit, onSuccess }) {
   const { placeBid, loading } = usePlaceBid();
   const [amount, setAmount] = useState("");
   const [status, setStatus] = useState("");
-  const [bidSteps, setBidSteps] = useState([]);
-  const [bidSuccess, setBidSuccess] = useState(false);
+  const [bidOperationData, setBidOperationData] = useState(null);
 
   const depositSui = minDeposit / 1_000_000_000;
 
@@ -339,25 +338,21 @@ function BidPanel({ auctionId, minDeposit, onSuccess }) {
       return;
     }
 
-    const tracker = createStepTracker(setBidSteps);
-    setBidSuccess(false);
+    setBidOperationData(null);
     setStatus("生成承诺哈希...");
 
     // Step 1: Generate salt (32 bytes, CSPRNG)
-    tracker.add("生成 32 字节 CSPRNG 随机盐值");
     const salt = randomBytes(32);
-    tracker.done();
 
     // Step 2: Compute SHA-256(amount_string || salt) CLIENT-SIDE
     // The amount and salt NEVER go on-chain during commit
-    tracker.add("浏览器计算 SHA-256(金额 || 盐值)");
+    const t0 = performance.now();
     const valueBytes = new TextEncoder().encode(amount);
     const data = new Uint8Array([...valueBytes, ...salt]);
     const hashHex = await createHash(data);
     const hashBytes = hexToBytes(hashHex);
-    tracker.done();
+    const hashMs = (performance.now() - t0).toFixed(1);
 
-    tracker.add("构建 PTB: from_hash + splitCoins + place_bid → 等待钱包签名...");
     setStatus("请在钱包中签名交易...");
 
     try {
@@ -366,13 +361,12 @@ function BidPanel({ auctionId, minDeposit, onSuccess }) {
         commitmentHash: hashBytes,
         depositMist: minDeposit,
       });
-      tracker.done("交易已确认");
 
-      // Step 4: Save secrets locally for reveal phase
+      // Save secrets locally for reveal phase
       saveBidSecret(auctionId, amount, bytesToHex(salt));
 
       setStatus(`出价已提交! 金额 ${amount} 已密封。\n承诺哈希: ${hashHex.substring(0, 20)}...`);
-      setBidSuccess(true);
+      setBidOperationData({ depositSui, hashMs });
       setAmount("");
       onSuccess();
     } catch (err) {
@@ -410,8 +404,24 @@ function BidPanel({ auctionId, minDeposit, onSuccess }) {
             {status}
           </p>
         )}
-        <XRayPanel steps={bidSteps} />
-        {bidSuccess && <ModuleTag module="hash_commitment" detail="SHA-256 承诺" />}
+        {bidOperationData && (
+          <>
+            <OperationDetail
+              browserSteps={[
+                { label: "生成随机盐值 (CSPRNG)", detail: "32 字节" },
+                { label: "计算 SHA-256(金额 || 盐值)", detail: `32 字节哈希 (${bidOperationData.hashMs}ms)` },
+                { label: "金额和盐值保存在浏览器 localStorage", detail: "不上链" },
+              ]}
+              privacyNote="金额和盐值永远不跨越此线 (直到你主动揭示)"
+              chainSteps={[
+                { label: "收到: 哈希 (32B) + 押金", detail: `${bidOperationData.depositSui} SUI` },
+                { label: "执行: hash_commitment::from_hash()", detail: "存储承诺" },
+                { label: "观察者无法从哈希反推出价金额", detail: "" },
+              ]}
+            />
+            <ModuleTag module="hash_commitment" detail="SHA-256 承诺" />
+          </>
+        )}
       </div>
     </div>
   );
@@ -423,8 +433,7 @@ function RevealPanel({ auctionId, bids, onSuccess }) {
   const { revealBid, loading } = useRevealBid();
   const account = useCurrentAccount();
   const [status, setStatus] = useState("");
-  const [revealSteps, setRevealSteps] = useState([]);
-  const [revealSuccess, setRevealSuccess] = useState(false);
+  const [revealOperationData, setRevealOperationData] = useState(null);
 
   const secrets = getBidSecrets(auctionId);
   const myBid = bids.find((b) => b.bidder === account?.address);
@@ -436,19 +445,16 @@ function RevealPanel({ auctionId, bids, onSuccess }) {
   const handleReveal = async () => {
     if (!mySecret) return;
 
-    const tracker = createStepTracker(setRevealSteps);
-    setRevealSuccess(false);
-
-    tracker.add("从本地存储读取金额和盐值");
+    setRevealOperationData(null);
 
     // Pre-flight: recompute hash locally to verify it matches commitment
     const valueBytes = new TextEncoder().encode(mySecret.amount);
     const saltBytes = hexToBytes(mySecret.saltHex);
     const data = new Uint8Array([...valueBytes, ...saltBytes]);
-    const recomputedHash = await createHash(data);
-    tracker.done();
 
-    tracker.add("预检: 重算 SHA-256 验证哈希匹配");
+    const t0 = performance.now();
+    const recomputedHash = await createHash(data);
+    const hashMs = (performance.now() - t0).toFixed(1);
 
     // Debug: show what we're about to send
     const debugInfo = [
@@ -469,9 +475,7 @@ function RevealPanel({ auctionId, bids, onSuccess }) {
         return;
       }
     }
-    tracker.done();
 
-    tracker.add("PTB: auction::reveal_bid(value, salt)");
     setStatus("哈希验证通过，请在钱包中签名揭示交易...");
 
     try {
@@ -480,14 +484,13 @@ function RevealPanel({ auctionId, bids, onSuccess }) {
         valueBytes,
         saltBytes,
       });
-      tracker.done("交易成功 (合约内部验证 hash 匹配)");
 
       // Mark as revealed locally
       const idx = secrets.indexOf(mySecret);
       markRevealed(auctionId, idx);
 
       setStatus(`已揭示! 出价金额: ${mySecret.amount} SUI`);
-      setRevealSuccess(true);
+      setRevealOperationData({ amount: mySecret.amount, hashMs });
       onSuccess();
     } catch (err) {
       setStatus(`错误: ${err.message}`);
@@ -524,8 +527,23 @@ function RevealPanel({ auctionId, bids, onSuccess }) {
           {status}
         </pre>
       )}
-      <XRayPanel steps={revealSteps} />
-      {revealSuccess && <ModuleTag module="hash_commitment::verify_opening" detail="链上哈希验证" />}
+      {revealOperationData && (
+        <>
+          <OperationDetail
+            browserSteps={[
+              { label: "从 localStorage 读取金额和盐值", detail: "本地数据" },
+              { label: "预检: 本地重算 SHA-256 验证匹配", detail: `通过 (${revealOperationData.hashMs}ms)` },
+            ]}
+            privacyNote="此时金额和盐值将上链 (揭示阶段)"
+            chainSteps={[
+              { label: "收到: 金额 + 盐值 (明文)", detail: "" },
+              { label: "执行: hash_commitment::verify_opening()", detail: "哈希匹配验证" },
+              { label: "交易成功", detail: `揭示金额: ${revealOperationData.amount}` },
+            ]}
+          />
+          <ModuleTag module="hash_commitment::verify_opening" detail="链上哈希验证" />
+        </>
+      )}
     </div>
   );
 }
@@ -664,27 +682,23 @@ function OnChainState({ auction, auctionId }) {
               })}
               {isObserver && (
                 <>
-                  <RawChainData
-                    label="链上原始拍卖数据"
-                    data={{
-                      phase: auction.phase,
-                      bidCount: auction.bidCount,
-                      commitDeadline: auction.commitDeadline,
-                      revealDeadline: auction.revealDeadline,
-                      minDeposit: auction.minDeposit,
-                      settled: auction.settled,
-                      winner: auction.winner,
-                      winningAmount: auction.winningAmount,
-                      bids: auction.bids.map((b) => ({
-                        bidder: b.bidder,
-                        commitmentHash: Array.isArray(b.commitmentHash)
-                          ? b.commitmentHash.map((x) => x.toString(16).padStart(2, "0")).join("")
-                          : b.commitmentHash,
-                        revealed: b.revealed,
-                        revealedAmount: b.revealedAmount,
-                      })),
-                    }}
-                  />
+                  {auction.bids.map((bid, i) => {
+                    const hashHex = Array.isArray(bid.commitmentHash)
+                      ? bid.commitmentHash.map((x) => x.toString(16).padStart(2, "0")).join("")
+                      : String(bid.commitmentHash);
+                    return (
+                      <AnnotatedChainData
+                        key={i}
+                        label={`链上原始拍卖数据 — 出价 #${i + 1}`}
+                        fields={[
+                          { key: "bidder", value: bid.bidder, note: "观察者知道: 谁提交了出价" },
+                          { key: "commitmentHash", value: hashHex, note: "观察者只能看到哈希，无法反推出价金额 (SHA-256 不可逆)" },
+                          { key: "revealed", value: String(bid.revealed), note: bid.revealed ? "出价已揭示" : "出价尚未揭示，金额保密" },
+                          { key: "depositAmount", value: bid.depositAmount, note: "观察者知道押金金额，但实际出价可能远高于押金" },
+                        ]}
+                      />
+                    );
+                  })}
                   <div className="mt-2">
                     <SuiscanLink objectId={auctionId} label="在 Suiscan 查看拍卖对象" />
                   </div>

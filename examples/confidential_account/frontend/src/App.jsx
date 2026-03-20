@@ -4,9 +4,9 @@ import { generateRangeProof, generateBlinding } from "./lib/prover";
 import { addressToSenderHash } from "./lib/sender-hash";
 import { saveAccountSecret, updateAccountSecret, getAccountSecret } from "./lib/local-store";
 import { useDeposit, useWithdraw, useAccountState, useMyAccounts } from "./hooks/use-account";
-import { XRayPanel, createStepTracker } from "./components/XRayPanel";
+import { OperationDetail } from "./components/OperationDetail";
 import { PrivacyToggle } from "./components/PrivacyToggle";
-import { SuiscanLink, RawChainData } from "./components/ChainDataView";
+import { SuiscanLink, AnnotatedChainData } from "./components/ChainDataView";
 import { ModuleTag } from "./components/ModuleTag";
 import "./index.css";
 
@@ -120,39 +120,34 @@ function DepositForm({ onSuccess }) {
   const [amount, setAmount] = useState("");
   const [proofStage, setProofStage] = useState("");
   const [error, setError] = useState("");
-  const [xraySteps, setXraySteps] = useState([]);
-  const [depositDone, setDepositDone] = useState(false);
+  const [depositDetail, setDepositDetail] = useState(null);
 
   const handleDeposit = async () => {
     if (!amount || !account?.address) return;
     const amountNum = parseInt(amount, 10);
     if (isNaN(amountNum) || amountNum <= 0) return;
     setError("");
-    setDepositDone(false);
-
-    const tracker = createStepTracker(setXraySteps);
+    setDepositDetail(null);
 
     try {
-      tracker.add("生成 248-bit 随机 blinding factor");
       const blinding = generateBlinding();
-      tracker.done("OK");
 
-      tracker.add("计算 sender_hash = Poseidon(address)");
+      const t0Hash = performance.now();
       const senderHash = await addressToSenderHash(account.address);
-      tracker.done("OK");
+      const senderHashTime = ((performance.now() - t0Hash) / 1000).toFixed(1);
 
       const depositMist = amountNum * MIST_PER_SUI;
 
-      tracker.add("生成 Groth16 证明 (7,949 约束)...");
+      setProofStage("proving");
+      const t0Proof = performance.now();
       const result = await generateRangeProof(
         depositMist.toString(),
         blinding,
         senderHash,
         setProofStage
       );
-      tracker.done("OK");
+      const proofTime = ((performance.now() - t0Proof) / 1000).toFixed(1);
 
-      tracker.add("PTB: splitCoins + account::deposit() → 等待钱包签名...");
       setProofStage("signing");
 
       const txResult = await deposit({
@@ -162,7 +157,6 @@ function DepositForm({ onSuccess }) {
         proofBytes: result.proofBytes,
         depositMist,
       });
-      tracker.done("交易成功 (合约内部执行 Groth16 验证)");
 
       if (txResult.accountId) {
         saveAccountSecret(txResult.accountId, {
@@ -172,7 +166,7 @@ function DepositForm({ onSuccess }) {
         });
         setProofStage("");
         setAmount("");
-        setDepositDone(true);
+        setDepositDetail({ senderHashTime, proofTime, amount: amountNum });
         onSuccess(txResult.accountId);
       }
     } catch (err) {
@@ -206,10 +200,25 @@ function DepositForm({ onSuccess }) {
         </button>
       </div>
 
-      <XRayPanel steps={xraySteps} />
-
-      {depositDone && (
-        <ModuleTag module="pedersen + range_proof" detail="7,949 约束 | Groth16 on BN254" />
+      {depositDetail && (
+        <>
+          <OperationDetail
+            browserSteps={[
+              { label: "生成随机 blinding factor", detail: "248-bit" },
+              { label: "Poseidon(address) 计算 sender_hash", detail: `${depositDetail.senderHashTime}s` },
+              { label: "加载 ZK 电路 + 证明密钥", detail: "4.8 MB" },
+              { label: "生成 Groth16 证明 (7,949 约束)", detail: `${depositDetail.proofTime}s` },
+              { label: "输出: proof + commitment", detail: "128B + 64B" },
+            ]}
+            privacyNote="余额和 blinding 永远不跨越此线"
+            chainSteps={[
+              { label: `收到: proof + commitment + ${depositDetail.amount} SUI`, detail: "" },
+              { label: "执行: range_proof::verify_range_64()", detail: "BN254 配对验证" },
+              { label: "存储: 承诺坐标 (无法反算余额) + SUI 锁入金库", detail: "" },
+            ]}
+          />
+          <ModuleTag module="pedersen + range_proof" detail="7,949 约束 | Groth16 on BN254" />
+        </>
       )}
 
       {error && <p className="mt-3 text-xs text-red-400">{error}</p>}
@@ -281,15 +290,13 @@ function AccountView({ accountId, onBack }) {
                   <p className="text-[10px] text-amber-500/70 mt-1">
                     观察者无法看到余额明文，只能看到链上承诺坐标
                   </p>
-                  <RawChainData
+                  <AnnotatedChainData
                     label="链上原始账户数据"
-                    data={{
-                      commitmentX: account?.commitmentX ? formatBytes(account.commitmentX) : null,
-                      commitmentY: account?.commitmentY ? formatBytes(account.commitmentY) : null,
-                      vaultBalance: account?.vaultBalance,
-                      totalDeposited: account?.totalDeposited,
-                      totalWithdrawn: account?.totalWithdrawn,
-                    }}
+                    fields={[
+                      { key: "commitment_x", value: formatBytes(account?.commitmentX), note: "Pedersen 承诺 x 坐标 -- 无法从坐标反算余额 (离散对数问题)" },
+                      { key: "commitment_y", value: formatBytes(account?.commitmentY), note: "Pedersen 承诺 y 坐标 -- 与 x 配对构成椭圆曲线上的点" },
+                      { key: "vault_balance", value: `${(account?.vaultBalance / 1e9).toFixed(2)} SUI`, note: "观察者知道金库锁了多少 SUI，但不知道用户声称的保密余额" },
+                    ]}
                   />
                   <div className="mt-2">
                     <SuiscanLink objectId={accountId} label="在 Suiscan 查看账户对象" />
@@ -343,8 +350,7 @@ function WithdrawForm({ accountId, secret, account, onSuccess }) {
   const [amount, setAmount] = useState("");
   const [proofStage, setProofStage] = useState("");
   const [error, setError] = useState("");
-  const [xraySteps, setXraySteps] = useState([]);
-  const [withdrawDone, setWithdrawDone] = useState(false);
+  const [withdrawDetail, setWithdrawDetail] = useState(null);
 
   const maxWithdraw = account.totalDeposited - account.totalWithdrawn;
 
@@ -360,36 +366,32 @@ function WithdrawForm({ accountId, secret, account, onSuccess }) {
     }
 
     setError("");
-    setWithdrawDone(false);
-
-    const tracker = createStepTracker(setXraySteps);
+    setWithdrawDetail(null);
 
     try {
-      tracker.add("计算新余额");
       const currentMist = parseInt(secret.value, 10);
       const newValue = currentMist - withdrawMist;
       if (newValue < 0) {
         setError("保密余额不足");
         return;
       }
-      tracker.done(`${newValue} MIST`);
 
-      tracker.add("生成新 blinding factor");
       const newBlinding = generateBlinding();
-      tracker.done("OK");
 
+      const t0Hash = performance.now();
       const senderHash = await addressToSenderHash(currentAccount.address);
+      const senderHashTime = ((performance.now() - t0Hash) / 1000).toFixed(1);
 
-      tracker.add("为新余额生成 Groth16 证明...");
+      setProofStage("proving");
+      const t0Proof = performance.now();
       const result = await generateRangeProof(
         newValue.toString(),
         newBlinding,
         senderHash,
         setProofStage
       );
-      tracker.done("OK");
+      const proofTime = ((performance.now() - t0Proof) / 1000).toFixed(1);
 
-      tracker.add("PTB: account::withdraw(new_commitment, proof) → 等待钱包签名...");
       setProofStage("signing");
 
       await withdraw({
@@ -400,7 +402,6 @@ function WithdrawForm({ accountId, secret, account, onSuccess }) {
         proofBytes: result.proofBytes,
         withdrawMist,
       });
-      tracker.done("交易成功 (合约内部验证 range proof)");
 
       updateAccountSecret(accountId, {
         value: newValue.toString(),
@@ -409,7 +410,7 @@ function WithdrawForm({ accountId, secret, account, onSuccess }) {
 
       setProofStage("");
       setAmount("");
-      setWithdrawDone(true);
+      setWithdrawDetail({ senderHashTime, proofTime, amount: withdrawNum, newValue });
       onSuccess();
     } catch (err) {
       setError(err.message);
@@ -442,10 +443,25 @@ function WithdrawForm({ accountId, secret, account, onSuccess }) {
         </button>
       </div>
 
-      <XRayPanel steps={xraySteps} />
-
-      {withdrawDone && (
-        <ModuleTag module="range_proof" detail="余额合法性验证" />
+      {withdrawDetail && (
+        <>
+          <OperationDetail
+            browserSteps={[
+              { label: "计算新余额 & 新 blinding factor", detail: `${(withdrawDetail.newValue / MIST_PER_SUI).toFixed(2)} SUI` },
+              { label: "Poseidon(address) 计算 sender_hash", detail: `${withdrawDetail.senderHashTime}s` },
+              { label: "加载 ZK 电路 + 证明密钥", detail: "4.8 MB" },
+              { label: "生成 Groth16 证明 (7,949 约束)", detail: `${withdrawDetail.proofTime}s` },
+              { label: "输出: proof + new_commitment", detail: "128B + 64B" },
+            ]}
+            privacyNote="余额和 blinding 永远不跨越此线"
+            chainSteps={[
+              { label: `收到: proof + new_commitment, 释放 ${withdrawDetail.amount} SUI`, detail: "" },
+              { label: "执行: range_proof::verify_range_64()", detail: "BN254 配对验证" },
+              { label: "更新: 承诺坐标 + 从金库释放 SUI 至用户", detail: "" },
+            ]}
+          />
+          <ModuleTag module="range_proof" detail="余额合法性验证" />
+        </>
       )}
 
       {error && <p className="mt-3 text-xs text-red-400">{error}</p>}

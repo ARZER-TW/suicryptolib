@@ -11,9 +11,9 @@ import {
   useGroupState,
   useGroupMembers,
 } from "./hooks/use-semaphore";
-import { XRayPanel, createStepTracker } from "./components/XRayPanel";
+import { OperationDetail } from "./components/OperationDetail";
 import { PrivacyToggle } from "./components/PrivacyToggle";
-import { SuiscanLink, RawChainData } from "./components/ChainDataView";
+import { SuiscanLink, AnnotatedChainData } from "./components/ChainDataView";
 import { ModuleTag } from "./components/ModuleTag";
 import "./index.css";
 
@@ -140,7 +140,7 @@ function GroupView({ groupId, onBack }) {
   const refreshAll = () => {
     refreshGroup();
     setIdentity(getIdentity(groupId));
-    // Event indexing may lag behind tx confirmation — retry with delay
+    // Event indexing may lag behind tx confirmation -- retry with delay
     refreshMembers();
     setTimeout(refreshMembers, 2000);
     setTimeout(refreshMembers, 5000);
@@ -222,16 +222,14 @@ function GroupView({ groupId, onBack }) {
                     链上只看到 nullifier_hash，无法确定是谁操作
                   </p>
                 )}
-                <RawChainData
+                <AnnotatedChainData
                   label="链上原始群组数据"
-                  data={{
-                    merkleRoot: group?.merkleRoot ? String(group.merkleRoot) : null,
-                    nextIndex: group?.nextIndex,
-                    members: members.map((m) => ({
-                      memberIndex: m.memberIndex,
-                      commitment: String(m.commitment),
-                    })),
-                  }}
+                  fields={[
+                    { key: "merkle_root", value: String(group.merkleRoot).substring(0, 32) + "...", note: "群组的 Merkle 树根 -- 无法从 root 反推成员列表" },
+                    { key: "next_index", value: group.nextIndex, note: "观察者知道群组有多少成员" },
+                    { key: "members[i].commitment", value: "Poseidon(secret, nullifier)", note: "每个成员只是一个数字 -- 无法关联到任何钱包地址或真实身份" },
+                    ...(verifyResult ? [{ key: "nullifier_hash", value: "0x...", note: "观察者知道有人操作了，但无法确定是哪个成员" }] : []),
+                  ]}
                 />
                 <div className="mt-2">
                   <SuiscanLink objectId={groupId} label="在 Suiscan 查看群组对象" />
@@ -277,28 +275,22 @@ function JoinPanel({ groupId, onSuccess }) {
   const { addMember, loading } = useAddMember();
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
-  const [xraySteps, setXraySteps] = useState([]);
   const [joined, setJoined] = useState(false);
 
   const handleJoin = async () => {
     setError("");
     setJoined(false);
     setStatus("生成匿名身份...");
-    const tracker = createStepTracker(setXraySteps);
 
     try {
-      tracker.add("生成随机身份密钥 + 计算 Poseidon 承诺...");
       const identity = await createIdentity();
-      tracker.done("identity_secret + identity_nullifier + Poseidon(s, n)");
 
       setStatus("提交身份承诺到链上...");
-      tracker.add("PTB: semaphore::add_member(commitment)");
 
       await addMember({
         groupId,
         commitment: identity.commitment,
       });
-      tracker.done("交易成功 (合约内部更新 Incremental Merkle Tree)");
 
       saveIdentity(groupId, identity);
       setStatus("");
@@ -330,9 +322,22 @@ function JoinPanel({ groupId, onSuccess }) {
           <span className="text-xs text-indigo-400">{status}</span>
         </div>
       )}
-      <XRayPanel steps={xraySteps} />
       {joined && (
-        <ModuleTag module="semaphore + merkle_poseidon" detail="Poseidon Incremental Merkle Tree" />
+        <>
+          <OperationDetail
+            browserSteps={[
+              { label: "生成随机 identity 密钥", detail: "248-bit x 2" },
+              { label: "Poseidon(secret, nullifier) = commitment", detail: "身份承诺" },
+            ]}
+            privacyNote="identity_secret 和 nullifier_key 永远不跨越此线"
+            chainSteps={[
+              { label: "收到: identity commitment (u256)", detail: "32 字节" },
+              { label: "执行: semaphore::add_member()", detail: "Incremental Merkle 更新" },
+              { label: "观察者只看到承诺数字，无法关联到任何人", detail: "" },
+            ]}
+          />
+          <ModuleTag module="semaphore + merkle_poseidon" detail="Poseidon Incremental Merkle Tree" />
+        </>
       )}
       {error && <p className="text-xs text-red-400">{error}</p>}
     </div>
@@ -347,8 +352,8 @@ function AnonymousAction({ groupId, identity, members, merkleRoot, onVerified })
   const [proofStage, setProofStage] = useState("");
   const [result, setResult] = useState("");
   const [error, setError] = useState("");
-  const [xraySteps, setXraySteps] = useState([]);
   const [verified, setVerified] = useState(false);
+  const [proofTime, setProofTime] = useState(null);
 
   const stages = {
     building: "构建 Poseidon Merkle 树...",
@@ -363,19 +368,15 @@ function AnonymousAction({ groupId, identity, members, merkleRoot, onVerified })
     setError("");
     setResult("");
     setVerified(false);
-    const tracker = createStepTracker(setXraySteps);
+    setProofTime(null);
 
     try {
       setProofStage("building");
 
-      tracker.add("从链上事件读取成员列表");
       // Build tree from on-chain members
       const commitments = members.map((m) => BigInt(m.commitment));
-      tracker.done();
 
-      tracker.add(`构建 Poseidon Merkle 树 (8 层, ${commitments.length} 个成员)`);
       const tree = await buildMerkleTree(commitments, TREE_DEPTH);
-      tracker.done();
 
       // Find my leaf index
       const myIndex = commitments.findIndex((c) => c === identity.commitment);
@@ -385,12 +386,10 @@ function AnonymousAction({ groupId, identity, members, merkleRoot, onVerified })
         return;
       }
 
-      tracker.add("计算 Merkle proof (path_elements + path_indices)");
       const merkleProof = generateMerkleProof(tree, myIndex);
-      tracker.done();
 
       // Generate ZK proof (includes nullifier_hash computation + format conversion)
-      tracker.add("计算 nullifier_hash + 生成 Groth16 证明 (2,454 约束) + 转换格式...");
+      const proofStart = performance.now();
       const proofResult = await generateSemaphoreProof({
         identity,
         merkleProof,
@@ -398,10 +397,11 @@ function AnonymousAction({ groupId, identity, members, merkleRoot, onVerified })
         externalNullifier: BigInt(extNullifier),
         onProgress: setProofStage,
       });
-      tracker.done("Poseidon nullifier + snarkjs fullProve + Arkworks 128 bytes");
+      const proofEnd = performance.now();
+      const elapsedSeconds = ((proofEnd - proofStart) / 1000).toFixed(1);
+      setProofTime(elapsedSeconds);
 
       setProofStage("signing");
-      tracker.add("PTB: semaphore::verify_proof(root, nullifier, proof)");
 
       await verifyProof({
         groupId,
@@ -410,7 +410,6 @@ function AnonymousAction({ groupId, identity, members, merkleRoot, onVerified })
         externalNullifier: proofResult.externalNullifier,
         proofBytes: proofResult.proofBytes,
       });
-      tracker.done("交易成功 (合约内部 Groth16 验证 + nullifier 记录)");
 
       setResult("验证成功! 你已匿名证明了群组成员身份。");
       setVerified(true);
@@ -459,9 +458,25 @@ function AnonymousAction({ groupId, identity, members, merkleRoot, onVerified })
           <span className="text-xs text-indigo-400">{stages[proofStage] || proofStage}</span>
         </div>
       )}
-      <XRayPanel steps={xraySteps} />
       {verified && (
-        <ModuleTag module="semaphore::verify_proof" detail="2,454 约束 | 匿名成员证明" />
+        <>
+          <OperationDetail
+            browserSteps={[
+              { label: "从链上事件重建 Poseidon Merkle 树", detail: `${members.length} 个成员` },
+              { label: "计算 Merkle proof (path + indices)", detail: "8 层" },
+              { label: "加载 ZK 电路 + 证明密钥", detail: "4.0 MB" },
+              { label: "生成 Groth16 证明 (2,454 约束)", detail: `${proofTime}s` },
+              { label: "输出: proof", detail: "128 字节" },
+            ]}
+            privacyNote="你的身份永远不跨越此线"
+            chainSteps={[
+              { label: "收到: proof + merkle_root + nullifier_hash", detail: "" },
+              { label: "执行: Groth16 验证 + nullifier 记录", detail: "BN254 配对" },
+              { label: "结果: 确认你是成员，但不知道你是谁", detail: "" },
+            ]}
+          />
+          <ModuleTag module="semaphore::verify_proof" detail="2,454 约束 | 匿名成员证明" />
+        </>
       )}
       {result && <p className="text-xs text-emerald-400">{result}</p>}
       {error && <p className="text-xs text-red-400">{error}</p>}

@@ -1,6 +1,5 @@
 /**
- * ChainDataView — shows raw on-chain data + Suiscan link.
- * Used in observer view to prove data is real and verifiable.
+ * ChainDataView — shows raw on-chain data with annotations + Suiscan link.
  */
 
 const SUISCAN_BASE = "https://suiscan.xyz/testnet";
@@ -27,15 +26,31 @@ export function SuiscanLink({ objectId, txDigest, label }) {
   );
 }
 
-export function RawChainData({ data, label }) {
-  if (!data) return null;
+/**
+ * Annotated chain data — each field has a value and an explanation
+ * of what observers can/cannot learn from it.
+ *
+ * fields: [{ key, value, note }]
+ */
+export function AnnotatedChainData({ label, fields }) {
+  if (!fields || fields.length === 0) return null;
 
   return (
     <div className="mt-3 rounded-md bg-zinc-950 border border-zinc-800 p-3">
       {label && <p className="text-[10px] text-zinc-600 mb-2 uppercase tracking-wider">{label}</p>}
-      <pre className="text-[10px] font-mono text-zinc-600 whitespace-pre-wrap break-all leading-relaxed max-h-40 overflow-y-auto">
-        {typeof data === "string" ? data : JSON.stringify(data, null, 2)}
-      </pre>
+      <div className="space-y-2">
+        {fields.map((f, i) => (
+          <div key={i}>
+            <div className="flex gap-2 text-[10px] font-mono">
+              <span className="text-zinc-500 shrink-0">{f.key}:</span>
+              <span className="text-zinc-400 break-all">{String(f.value ?? "...")}</span>
+            </div>
+            {f.note && (
+              <p className="text-[10px] text-amber-600/70 mt-0.5 ml-2">{f.note}</p>
+            )}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
