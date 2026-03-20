@@ -20,7 +20,7 @@ function App() {
         <div className="max-w-3xl mx-auto flex items-center justify-between">
           <div className="flex items-center gap-2.5">
             <div className="w-7 h-7 rounded-md bg-emerald-600 flex items-center justify-center text-[11px] font-bold text-white tracking-tight">ZK</div>
-            <span className="text-[15px] font-medium tracking-tight text-zinc-300">Confidential Account</span>
+            <span className="text-[15px] font-medium tracking-tight text-zinc-300">保密账户</span>
           </div>
           <ConnectButton />
         </div>
@@ -29,10 +29,10 @@ function App() {
       <main className="max-w-3xl mx-auto px-6 py-10">
         {!account ? (
           <div className="py-20 text-center">
-            <h1 className="text-2xl font-semibold mb-3 text-zinc-100">Private Balance on Sui</h1>
+            <h1 className="text-2xl font-semibold mb-3 text-zinc-100">Sui 链上隐私余额</h1>
             <p className="text-zinc-500 mb-8 max-w-md mx-auto text-[15px] leading-relaxed">
-              Deposit SUI into a confidential account. Your balance is hidden inside a Pedersen Commitment
-              and verified by a Groth16 zero-knowledge proof. No one can see your actual balance.
+              将 SUI 存入保密账户，余额隐藏在 Pedersen 承诺中，
+              由 Groth16 零知识证明验证。没有人能看到你的实际余额。
             </p>
             <ConnectButton />
           </div>
@@ -56,7 +56,7 @@ function App() {
 
       <footer className="border-t border-zinc-800/40 py-6 text-center">
         <p className="text-[11px] text-zinc-700">
-          SuiCryptoLib -- pedersen + range_proof modules -- Groth16 on BN254
+          SuiCryptoLib -- pedersen + range_proof -- Groth16 on BN254
         </p>
       </footer>
     </div>
@@ -71,8 +71,8 @@ function DashboardView({ onSelect }) {
   return (
     <div className="space-y-8">
       <div>
-        <h1 className="text-xl font-semibold text-zinc-100 mb-1">Your Accounts</h1>
-        <p className="text-sm text-zinc-500">Confidential accounts with zero-knowledge balance proofs</p>
+        <h1 className="text-xl font-semibold text-zinc-100 mb-1">我的账户</h1>
+        <p className="text-sm text-zinc-500">基于零知识证明的保密余额账户</p>
       </div>
 
       <DepositForm
@@ -84,7 +84,7 @@ function DashboardView({ onSelect }) {
 
       {accounts.length > 0 && (
         <div className="space-y-2">
-          <h2 className="text-sm font-medium text-zinc-400">Existing accounts</h2>
+          <h2 className="text-sm font-medium text-zinc-400">已有账户</h2>
           {accounts.map((acc) => {
             const secret = getAccountSecret(acc.id);
             return (
@@ -96,7 +96,7 @@ function DashboardView({ onSelect }) {
                 <div className="flex justify-between items-center">
                   <span className="text-xs font-mono text-zinc-500">{acc.id?.substring(0, 16)}...</span>
                   <span className="text-sm text-zinc-300">
-                    {secret ? `${(parseInt(secret.value, 10) / MIST_PER_SUI).toFixed(2)} SUI (private)` : `${(acc.vaultBalance / MIST_PER_SUI).toFixed(2)} SUI locked`}
+                    {secret ? `${(parseInt(secret.value, 10) / MIST_PER_SUI).toFixed(2)} SUI (保密)` : `${(acc.vaultBalance / MIST_PER_SUI).toFixed(2)} SUI 已锁定`}
                   </span>
                 </div>
               </button>
@@ -118,11 +118,11 @@ function DepositForm({ onSuccess }) {
   const [error, setError] = useState("");
 
   const stages = {
-    loading: "Loading circuit...",
-    proving: "Generating ZK proof...",
-    converting: "Converting to Sui format...",
-    done: "Proof ready",
-    signing: "Sign in wallet...",
+    loading: "加载电路中...",
+    proving: "生成零知识证明中...",
+    converting: "转换为 Sui 格式...",
+    done: "证明已就绪",
+    signing: "请在钱包中签名...",
   };
 
   const handleDeposit = async () => {
@@ -136,7 +136,6 @@ function DepositForm({ onSuccess }) {
       const blinding = generateBlinding();
       const depositMist = amountNum * MIST_PER_SUI;
 
-      // Commitment value must use MIST (same unit as vault balance)
       const result = await generateRangeProof(
         depositMist.toString(),
         blinding,
@@ -174,13 +173,13 @@ function DepositForm({ onSuccess }) {
 
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-5">
-      <h2 className="text-sm font-medium text-zinc-300 mb-3">New confidential deposit</h2>
+      <h2 className="text-sm font-medium text-zinc-300 mb-3">新建保密存款</h2>
       <div className="flex gap-3">
         <input
           type="text"
           inputMode="numeric"
           pattern="[0-9]*"
-          placeholder="Amount (SUI)"
+          placeholder="金额 (SUI)"
           value={amount}
           onChange={(e) => setAmount(e.target.value.replace(/\D/g, ""))}
           disabled={isWorking}
@@ -191,7 +190,7 @@ function DepositForm({ onSuccess }) {
           disabled={!amount || isWorking}
           className="px-5 py-2 rounded-md bg-emerald-600 text-white text-sm font-medium hover:bg-emerald-500 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
         >
-          {isWorking ? "Working..." : "Deposit"}
+          {isWorking ? "处理中..." : "存款"}
         </button>
       </div>
 
@@ -214,27 +213,27 @@ function AccountView({ accountId, onBack }) {
   const secret = getAccountSecret(accountId);
 
   if (!account && loading) {
-    return <p className="text-zinc-500 text-center py-16 text-sm">Loading account...</p>;
+    return <p className="text-zinc-500 text-center py-16 text-sm">加载账户数据...</p>;
   }
 
   return (
     <div className="space-y-6">
       <button onClick={onBack} className="text-xs text-zinc-600 hover:text-zinc-400 transition-colors">
-        &larr; Back to dashboard
+        &larr; 返回仪表盘
       </button>
 
       {/* Balance Card */}
       <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-6">
         <div className="flex items-start justify-between mb-6">
           <div>
-            <p className="text-xs text-zinc-600 mb-1 uppercase tracking-wider">Private Balance</p>
+            <p className="text-xs text-zinc-600 mb-1 uppercase tracking-wider">保密余额</p>
             <p className="text-3xl font-semibold text-zinc-100 tabular-nums">
               {secret ? (parseInt(secret.value, 10) / MIST_PER_SUI).toFixed(2) : "***"}
               <span className="text-lg text-zinc-500 ml-1">SUI</span>
             </p>
           </div>
           <div className="text-right">
-            <p className="text-[10px] text-zinc-700 uppercase tracking-wider mb-1">Vault (on-chain)</p>
+            <p className="text-[10px] text-zinc-700 uppercase tracking-wider mb-1">链上金库</p>
             <p className="text-sm text-zinc-400 tabular-nums">
               {account ? (account.vaultBalance / MIST_PER_SUI).toFixed(2) : "..."} SUI
             </p>
@@ -243,11 +242,11 @@ function AccountView({ accountId, onBack }) {
 
         <div className="grid grid-cols-2 gap-4 text-xs">
           <div className="px-3 py-2 rounded bg-zinc-800/60">
-            <p className="text-zinc-600 mb-0.5">Total deposited</p>
+            <p className="text-zinc-600 mb-0.5">累计存入</p>
             <p className="text-zinc-400 tabular-nums">{account ? (account.totalDeposited / MIST_PER_SUI).toFixed(2) : "..."} SUI</p>
           </div>
           <div className="px-3 py-2 rounded bg-zinc-800/60">
-            <p className="text-zinc-600 mb-0.5">Total withdrawn</p>
+            <p className="text-zinc-600 mb-0.5">累计提取</p>
             <p className="text-zinc-400 tabular-nums">{account ? (account.totalWithdrawn / MIST_PER_SUI).toFixed(2) : "..."} SUI</p>
           </div>
         </div>
@@ -255,7 +254,7 @@ function AccountView({ accountId, onBack }) {
 
       {/* On-chain Commitment */}
       <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-5">
-        <p className="text-xs text-zinc-600 uppercase tracking-wider mb-2">On-chain commitment (public)</p>
+        <p className="text-xs text-zinc-600 uppercase tracking-wider mb-2">链上承诺 (公开可见)</p>
         <p className="text-[11px] font-mono text-zinc-600 break-all leading-relaxed">
           x: {account?.commitmentX ? formatBytes(account.commitmentX) : "..."}
         </p>
@@ -263,7 +262,7 @@ function AccountView({ accountId, onBack }) {
           y: {account?.commitmentY ? formatBytes(account.commitmentY) : "..."}
         </p>
         <p className="text-[10px] text-zinc-700 mt-2">
-          This is all that observers can see. The actual balance cannot be derived from these coordinates.
+          这是观察者能看到的全部内容。无法从这些坐标推算出实际余额。
         </p>
       </div>
 
@@ -273,7 +272,7 @@ function AccountView({ accountId, onBack }) {
       )}
 
       {/* Object ID */}
-      <p className="text-[10px] text-zinc-800 font-mono break-all">Account: {accountId}</p>
+      <p className="text-[10px] text-zinc-800 font-mono break-all">账户: {accountId}</p>
     </div>
   );
 }
@@ -288,11 +287,11 @@ function WithdrawForm({ accountId, secret, account, onSuccess }) {
   const [error, setError] = useState("");
 
   const stages = {
-    loading: "Loading circuit...",
-    proving: "Generating ZK proof for new balance...",
-    converting: "Converting to Sui format...",
-    done: "Proof ready",
-    signing: "Sign in wallet...",
+    loading: "加载电路中...",
+    proving: "为新余额生成零知识证明...",
+    converting: "转换为 Sui 格式...",
+    done: "证明已就绪",
+    signing: "请在钱包中签名...",
   };
 
   const maxWithdraw = account.totalDeposited - account.totalWithdrawn;
@@ -304,18 +303,17 @@ function WithdrawForm({ accountId, secret, account, onSuccess }) {
 
     const withdrawMist = withdrawNum * MIST_PER_SUI;
     if (withdrawMist > maxWithdraw) {
-      setError("Exceeds available balance");
+      setError("超出可用余额");
       return;
     }
 
     setError("");
 
     try {
-      // secret.value is in MIST, withdrawMist is also MIST
       const currentMist = parseInt(secret.value, 10);
       const newValue = currentMist - withdrawMist;
       if (newValue < 0) {
-        setError("Insufficient private balance");
+        setError("保密余额不足");
         return;
       }
 
@@ -358,13 +356,13 @@ function WithdrawForm({ accountId, secret, account, onSuccess }) {
 
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-5">
-      <h2 className="text-sm font-medium text-zinc-300 mb-3">Withdraw</h2>
+      <h2 className="text-sm font-medium text-zinc-300 mb-3">提取</h2>
       <div className="flex gap-3">
         <input
           type="text"
           inputMode="numeric"
           pattern="[0-9]*"
-          placeholder={`Max: ${(maxWithdraw / MIST_PER_SUI).toFixed(0)} SUI`}
+          placeholder={`最大: ${(maxWithdraw / MIST_PER_SUI).toFixed(0)} SUI`}
           value={amount}
           onChange={(e) => setAmount(e.target.value.replace(/\D/g, ""))}
           disabled={isWorking}
@@ -375,7 +373,7 @@ function WithdrawForm({ accountId, secret, account, onSuccess }) {
           disabled={!amount || isWorking}
           className="px-5 py-2 rounded-md bg-zinc-700 text-zinc-200 text-sm font-medium hover:bg-zinc-600 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
         >
-          {isWorking ? "Working..." : "Withdraw"}
+          {isWorking ? "处理中..." : "提取"}
         </button>
       </div>
 
