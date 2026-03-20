@@ -14,11 +14,14 @@
     "@mysten/sui": "^2.9.1",
     "@tailwindcss/vite": "^4.2.2",
     "@tanstack/react-query": "^5.91.3",
+    "buffer": "^6.0.3",
     "circomlibjs": "^0.1.7",
+    "events": "^3.3.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "snarkjs": "^0.7.6",
-    "tailwindcss": "^4.2.2"
+    "tailwindcss": "^4.2.2",
+    "vite-plugin-node-polyfills": "^0.25.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
