@@ -332,184 +332,55 @@ suicryptolib/
 
 ## 十、面向 Sui 工程师的技术说明
 
-> 本节面向熟悉 Sui、会写 Move 的工程师，用技术语言说明 SuiCryptoLib 到底做了什么、怎么做的、为什么这样做。
+> 本节面向熟悉 Sui、会写 Move 的工程师，说明 SuiCryptoLib 到底做了什么、怎么做的、为什么这样做。
 
 ### 10.1 Sui 原生提供了什么 vs SuiCryptoLib 补了什么
 
-Sui Framework 提供的是**原始工具**：
+Sui Framework 提供的是原始密码学函数：SHA-256、Blake2b、Keccak256 的哈希运算，Groth16 证明的 pairing 验证，以及 Poseidon 哈希。但这些只是最底层的「零件」— 就像有了螺丝和钢板，但没有预制好的桥梁构件。
 
-| Sui 原生 | 能力 | 限制 |
-|----------|------|------|
-| `std::hash::sha2_256` | 算 SHA-256 | 只是一个哈希函数，不管 commitment 语义 |
-| `sui::hash::keccak256` / `blake2b256` | 其他哈希 | 同上 |
-| `sui::groth16::verify_groth16_proof` | 验证 Groth16 证明 | 只做 pairing check，不管电路逻辑 |
-| `sui::poseidon::poseidon_bn254` | 算 Poseidon 哈希 | 输入是 `vector<u256>` 域元素，不是字节 |
+开发者想做一个密封拍卖，他需要的不是「一个 SHA-256 函数」，而是「一个完整的承诺-揭示方案」：包含承诺的数据结构、盐值长度的安全检查、多种哈希方案的切换、揭示时的验证逻辑。如果每个项目都自己从哈希函数开始搭，重复工作量大，而且很容易犯安全错误（比如忘记检查盐值长度、没做 domain separation）。
 
-SuiCryptoLib 补的是**组合模式**：
-
-```move
-// 没有 SuiCryptoLib：你得自己拼
-let mut data = vector::empty<u8>();
-vector::append(&mut data, value);
-vector::append(&mut data, salt);
-assert!(vector::length(&salt) >= 16, ESaltTooShort); // 自己记得检查
-let hash = std::hash::sha2_256(data);
-// 然后自己定义 Commitment struct、自己管理 scheme 选择...
-
-// 有 SuiCryptoLib：
-use suicryptolib::hash_commitment;
-let commitment = hash_commitment::compute(value, salt, 0);
-let valid = hash_commitment::verify_opening(&commitment, value, salt);
-```
-
-这只是最简单的例子。往上还有 Merkle proof 验证（含 domain separation 防第二前像攻击）、Poseidon Merkle（与 circomlib 一致的参数）、以及 Pedersen commitment 和 Range proof（走 Groth16 桥接到 Circom 电路）。
+SuiCryptoLib 把这些常见的密码学模式封装成了现成的 Move 模块。开发者只需要引入依赖，一行调用就能完成承诺的生成和验证，不需要关心底层的字节拼接、哈希选择、安全检查。
 
 ### 10.2 Groth16 桥接架构
 
-Sui Move 没有 BabyJubJub 曲线运算。Pedersen 和 Range Proof 需要椭圆曲线标量乘法，纯 Move 实现的 gas 成本不可接受。
+Sui Move 虚拟机没有 BabyJubJub 椭圆曲线的原生运算。但 Pedersen 承诺和范围证明都需要在这条曲线上做标量乘法和点加法。如果用纯 Move 实现椭圆曲线运算，gas 成本会非常高，代码也极其复杂。
 
-解决方案是 **Circom → snarkjs → Sui Groth16** 管线：
+我们的解决方案是利用 Sui 内置的 Groth16 验证器作为桥梁。具体流程是：在 Circom（一种零知识证明电路语言）中编写椭圆曲线运算逻辑，用 snarkjs 在链下生成零知识证明，然后把证明提交到 Sui 链上，由 Sui 原生的 Groth16 验证函数来验证。这样链上只需要做一次 pairing check（固定的、低成本的运算），所有复杂的椭圆曲线运算都在链下完成。
 
-```
-链下 (用户浏览器/服务端)                    链上 (Sui Move)
-┌─────────────────────────┐               ┌────────────────────────────┐
-│ Circom 电路              │               │ pedersen.move              │
-│  - EscalarMulFix(253, G) │  snarkjs      │                            │
-│  - EscalarMulFix(253, H) │ fullProve()   │  verify_commitment_proof() │
-│  - BabyAdd               │ ──────────→   │    groth16::verify(        │
-│  - Num2Bits(64)          │  proof bytes  │      &pvk, &inputs, &proof │
-│                          │               │    )                       │
-└─────────────────────────┘               └────────────────────────────┘
-```
+这个方案中最大的工程难点是格式转换。snarkjs 输出的证明格式是非压缩的仿射坐标（以 JSON 大整数表示），而 Sui 的 Groth16 验证器期望的是 Arkworks 库的压缩格式（little-endian 字节序，Y 坐标的符号位编码在最高位）。我们实现了完整的格式转换工具，先在一个简单的乘法电路上验证通过，再应用到 Pedersen 和 Range Proof 的生产电路上。
 
-**格式转换**是最关键的工程难点。snarkjs 输出非压缩 affine 坐标（JSON 大整数），Sui 要的是 Arkworks compressed 格式：
+### 10.3 Poseidon 一致性验证
 
-- **G1 点**：32 bytes，x 坐标 little-endian，最高位存 y 的符号位
-- **G2 点**：64 bytes，Fp2 的 c0 和 c1 分量各 32 bytes LE
-- **VK 布局**：alpha(G1, 32B) + beta(G2, 64B) + gamma(G2, 64B) + delta(G2, 64B) + IC_count(u64 LE, 8B) + IC_points(N x G1)
-- **Proof 布局**：pi_a(G1, 32B) + pi_b(G2, 64B) + pi_c(G1, 32B) = 固定 128 bytes
-- **Public inputs**：每个信号 32 bytes LE（BN254 标量域元素）
+Poseidon 是一种专门为零知识证明优化的哈希函数，它在 ZK 电路中的约束数远低于 SHA-256。但 Poseidon 有大量参数变体 — 不同的 round 数、不同的 MDS 矩阵、不同的 S-box 指数。如果链上用的 Poseidon 参数和 ZK 电路用的不一致，那么链下生成的 Merkle root 和链上计算的就会对不上，整个系统就无法工作。
 
-这套转换在 `circuits/poc/format_for_sui.mjs` 中建立，经过 PoC 验证后用于 Pedersen 和 Range Proof 的生产电路。
+我们的验证方法很直接：用 circomlib（ZK 电路生态中最主流的库）的 Poseidon 实现计算了 5 组参考值（分别是 1 到 5 个输入元素的哈希结果），然后在 Move 测试中用 Sui 内置的 Poseidon 函数计算同样的输入，断言两边结果完全相等。5 组全部匹配，确认了 Sui 和 circomlib 使用的是同一组 Poseidon 参数。这个一致性是 merkle_poseidon 模块能够工作的基础。
 
-### 10.3 Poseidon 一致性问题
+### 10.4 Demo 中的链上调用流程
 
-Poseidon 哈希有很多参数变体（t 值、round 数 RF/RP、MDS 矩阵、S-box 指数）。circomlib 用的参数组和 Sui 内置的 `poseidon_bn254` 必须完全一致，否则链上链下的 Merkle root 对不上。
+密封拍卖 Demo 展示了 SuiCryptoLib 在真实应用中的使用方式。每个用户操作背后都是真实的 Sui 链上交易。
 
-验证方法：用 circomlib 的 `buildPoseidon()` 计算 5 个参考向量（1 到 5 个输入），然后在 Move 测试中用 `sui::poseidon::poseidon_bn254()` 算同样的输入，`assert!` 结果相等。
+**出价过程：** 前端在用户的浏览器中用 Web Crypto API 计算出价金额和随机盐值的 SHA-256 哈希。然后构建一个 Programmable Transaction Block（Sui 的批量交易机制），在一笔交易中完成三件事：调用 SuiCryptoLib 的 from_hash 函数把哈希包装成 Commitment 数据结构，从 gas coin 中分出押金，最后调用拍卖合约的 place_bid 函数把 Commitment 和押金一起存入链上的 Auction 对象。整个过程只需要用户签名一次。
 
-```move
-// poseidon_poc.move 中的一个测试
-#[test]
-fun test_poseidon_single_input() {
-    let input = vector[1u256];
-    let result = poseidon::poseidon_bn254(&input);
-    // 这个值来自 circomlib JS: buildPoseidon()([1])
-    assert!(result == 18586133768512220936620570745912940619677854269274689475585506675881198879027u256, 0);
-}
-```
+**揭示过程：** 前端从浏览器的本地存储中取出之前保存的金额和盐值，发送到链上。拍卖合约内部调用 SuiCryptoLib 的 verify_opening 函数，重新计算 SHA-256(金额 || 盐值)，然后和链上存储的哈希进行比对。如果匹配，揭示成功，记录出价金额；如果不匹配，交易回滚。
 
-5 个值全部匹配，确认 Sui 和 circomlib 用的是同一组 Poseidon 参数。
+**安全保证：** 出价时，金额和盐值只存在于用户的浏览器本地存储中，完全不出现在链上交易数据里。链上只有 32 字节的 SHA-256 哈希值，任何人都无法从哈希反推出原始金额。直到揭示阶段，金额才上链 — 但此时承诺阶段已经结束，所有人的承诺都已锁定，看到别人的金额也无法修改自己的出价。
 
-### 10.4 Demo 中的链上调用链
+### 10.5 Commitment 的数据类型设计
 
-密封拍卖的每个用户操作对应的链上调用：
+SuiCryptoLib 中的 Commitment 是一个带有 store、copy、drop 能力的 struct，而不是一个 Sui object（没有 key 能力）。这个设计是刻意的。
 
-**出价（Programmable Transaction Block）：**
+作为非 object 的纯值类型，Commitment 可以被嵌入到其他 Sui object 中（比如拍卖合约的 Bid 结构），也可以在 Programmable Transaction Block 中作为中间值在多条指令之间传递。如果把它设计成 Sui object，每次创建都需要一个独立的链上对象，增加存储成本，也让 PTB 的组合变得更复杂。
 
-```typescript
-const tx = new Transaction();
+### 10.6 为什么需要 from_hash 函数
 
-// Step 1: 前端已在浏览器用 crypto.subtle.digest("SHA-256") 算好 hash
-// hash 是 SHA-256(amount_string || salt_32bytes)，共 32 bytes
+SuiCryptoLib 同时提供了 compute 和 from_hash 两个函数来创建 Commitment。compute 接受原始值和盐值，在链上计算哈希；from_hash 接受一个已经算好的哈希值。
 
-// Step 2: PTB 第一条指令 — 创建 Commitment 对象（不是 Sui object，是纯值）
-const [commitment] = tx.moveCall({
-  target: `${LIB}::hash_commitment::from_hash`,
-  arguments: [
-    tx.pure(bcs.vector(bcs.u8()).serialize(hashBytes)),  // 32 bytes hash
-    tx.pure(bcs.u8().serialize(0)),                       // scheme=SHA256
-  ],
-});
+在隐私场景中，必须使用 from_hash 而不是 compute。原因是 Sui 上的所有交易数据都是公开的。如果调用 compute 把金额和盐值作为交易参数传入，任何人查看这笔交易的输入数据就能直接看到明文金额，承诺方案的隐藏性就完全失效了。
 
-// Step 3: PTB 第二条指令 — 从 gas coin 分出押金
-const [deposit] = tx.splitCoins(tx.gas, [
-  tx.pure(bcs.u64().serialize(minDepositMist)),
-]);
+from_hash 的设计就是为了解决这个问题：让客户端在本地计算好哈希，只把 32 字节的哈希结果发到链上。链上存储的只有哈希，无法反推原始值。之后揭示时，verify_opening 函数会用同样的算法重新计算哈希，验证是否匹配。
 
-// Step 4: PTB 第三条指令 — 调用 place_bid
-// commitment 是 Step 2 的返回值（Commitment struct，非 object）
-// deposit 是 Step 3 的返回值（Coin<SUI>）
-tx.moveCall({
-  target: `${AUCTION}::auction::place_bid`,
-  arguments: [
-    tx.object(auctionId),     // Auction 共享对象
-    commitment,                // 纯值传递，不是 object reference
-    deposit,                   // Coin<SUI>
-    tx.object("0x6"),          // Clock 共享对象
-  ],
-});
-
-// 一个 PTB，三条指令，一次签名
-await signAndExecute({ transaction: tx });
-```
-
-**揭示：**
-
-```typescript
-const tx = new Transaction();
-tx.moveCall({
-  target: `${AUCTION}::auction::reveal_bid`,
-  arguments: [
-    tx.object(auctionId),
-    tx.pure(bcs.vector(bcs.u8()).serialize(valueBytes)),  // "500" → [53,48,48]
-    tx.pure(bcs.vector(bcs.u8()).serialize(saltBytes)),    // 32 bytes 原始盐
-    tx.object("0x6"),
-  ],
-});
-// Move 内部: hash_commitment::verify_opening(&commitment, value, salt)
-// 重算 sha2_256(value || salt)，比对链上存的 hash
-```
-
-**关键安全属性：** 出价时 `value` 和 `salt` 只存在于浏览器 localStorage，不出现在任何交易数据中。链上只有 32 bytes SHA-256 hash。揭示时 `value` 和 `salt` 才上链，此时承诺阶段已结束，其他人看到也无法修改自己的出价。
-
-### 10.5 Commitment 类型在 PTB 中的传递
-
-`Commitment` struct 的定义：
-
-```move
-public struct Commitment has store, copy, drop {
-    hash: vector<u8>,
-    scheme: u8,
-}
-```
-
-它有 `store + copy + drop`，**没有 `key`**，所以不是 Sui object。在 PTB 中，`from_hash()` 的返回值是一个纯值（pure value），可以直接作为下一条 `moveCall` 的参数传递。SDK 中用 `const [commitment] = tx.moveCall(...)` 解构取第一个返回值。
-
-### 10.6 为什么不能用 `compute()` 在链上算 hash？
-
-```move
-// 如果在 PTB 中调用 compute()：
-tx.moveCall({
-  target: `${LIB}::hash_commitment::compute`,
-  arguments: [
-    tx.pure(bcs.vector(bcs.u8()).serialize("500")),  // ← 金额明文！
-    tx.pure(bcs.vector(bcs.u8()).serialize(salt)),    // ← 盐值明文！
-    tx.pure(bcs.u8().serialize(0)),
-  ],
-});
-```
-
-交易数据是公开的。任何人检查这笔交易的 `input_objects` 就能看到 `"500"` 和 `salt`。承诺的隐藏性完全失效。
-
-所以必须在客户端算好 hash，只传 hash 上链：
-
-```move
-// 正确做法：浏览器算 hash，链上只存 hash
-from_hash(hash_bytes, 0)  // 链上只看到 32 bytes 的 hash，无法反推
-```
-
-`from_hash()` 这个函数就是为这个场景设计的 — 让客户端预计算 hash，链上只做存储和后续验证。
+这两个函数的存在反映了一个重要的架构原则：链上计算用于透明场景（比如合约间调用），链下预计算用于隐私场景（比如密封出价）。SuiCryptoLib 同时支持这两种模式。
 
 ---
 
