@@ -13,6 +13,7 @@ import {
 } from "./hooks/use-semaphore";
 import { XRayPanel, createStepTracker } from "./components/XRayPanel";
 import { PrivacyToggle } from "./components/PrivacyToggle";
+import { SuiscanLink, RawChainData } from "./components/ChainDataView";
 import { ModuleTag } from "./components/ModuleTag";
 import "./index.css";
 
@@ -138,8 +139,11 @@ function GroupView({ groupId, onBack }) {
 
   const refreshAll = () => {
     refreshGroup();
-    refreshMembers();
     setIdentity(getIdentity(groupId));
+    // Event indexing may lag behind tx confirmation — retry with delay
+    refreshMembers();
+    setTimeout(refreshMembers, 2000);
+    setTimeout(refreshMembers, 5000);
   };
 
   // Find current user's member index
@@ -218,6 +222,20 @@ function GroupView({ groupId, onBack }) {
                     链上只看到 nullifier_hash，无法确定是谁操作
                   </p>
                 )}
+                <RawChainData
+                  label="链上原始群组数据"
+                  data={{
+                    merkleRoot: group?.merkleRoot ? String(group.merkleRoot) : null,
+                    nextIndex: group?.nextIndex,
+                    members: members.map((m) => ({
+                      memberIndex: m.memberIndex,
+                      commitment: String(m.commitment),
+                    })),
+                  }}
+                />
+                <div className="mt-2">
+                  <SuiscanLink objectId={groupId} label="在 Suiscan 查看群组对象" />
+                </div>
               </div>
             ) : (
               <div>

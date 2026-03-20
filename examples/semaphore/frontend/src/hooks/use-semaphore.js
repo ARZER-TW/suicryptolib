@@ -185,8 +185,12 @@ export function useGroupMembers(groupId) {
   }, [client, groupId]);
 
   useEffect(() => {
+    if (!groupId) return;
     refresh();
-  }, [refresh]);
+    // Poll every 5 seconds (events may be indexed with delay)
+    const interval = setInterval(refresh, 5000);
+    return () => clearInterval(interval);
+  }, [groupId, refresh]);
 
   return { members, loading, refresh };
 }

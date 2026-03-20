@@ -6,6 +6,7 @@ import { saveAccountSecret, updateAccountSecret, getAccountSecret } from "./lib/
 import { useDeposit, useWithdraw, useAccountState, useMyAccounts } from "./hooks/use-account";
 import { XRayPanel, createStepTracker } from "./components/XRayPanel";
 import { PrivacyToggle } from "./components/PrivacyToggle";
+import { SuiscanLink, RawChainData } from "./components/ChainDataView";
 import { ModuleTag } from "./components/ModuleTag";
 import "./index.css";
 
@@ -276,9 +277,24 @@ function AccountView({ accountId, onBack }) {
               )}
 
               {isObserver && (
-                <p className="text-[10px] text-amber-500/70 mt-1">
-                  观察者无法看到余额明文，只能看到链上承诺坐标
-                </p>
+                <>
+                  <p className="text-[10px] text-amber-500/70 mt-1">
+                    观察者无法看到余额明文，只能看到链上承诺坐标
+                  </p>
+                  <RawChainData
+                    label="链上原始账户数据"
+                    data={{
+                      commitmentX: account?.commitmentX ? formatBytes(account.commitmentX) : null,
+                      commitmentY: account?.commitmentY ? formatBytes(account.commitmentY) : null,
+                      vaultBalance: account?.vaultBalance,
+                      totalDeposited: account?.totalDeposited,
+                      totalWithdrawn: account?.totalWithdrawn,
+                    }}
+                  />
+                  <div className="mt-2">
+                    <SuiscanLink objectId={accountId} label="在 Suiscan 查看账户对象" />
+                  </div>
+                </>
               )}
               {!isObserver && (
                 <p className="text-[10px] text-emerald-500/70 mt-3">

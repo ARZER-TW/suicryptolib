@@ -11,6 +11,7 @@ import {
 import { DEFAULT_MIN_DEPOSIT_MIST, PHASE_COMMIT, PHASE_REVEAL, PHASE_SETTLED } from "./config";
 import { XRayPanel, createStepTracker } from "./components/XRayPanel";
 import { PrivacyToggle } from "./components/PrivacyToggle";
+import { SuiscanLink, RawChainData } from "./components/ChainDataView";
 import { ModuleTag } from "./components/ModuleTag";
 import "./index.css";
 
@@ -661,6 +662,34 @@ function OnChainState({ auction, auctionId }) {
                   </div>
                 );
               })}
+              {isObserver && (
+                <>
+                  <RawChainData
+                    label="链上原始拍卖数据"
+                    data={{
+                      phase: auction.phase,
+                      bidCount: auction.bidCount,
+                      commitDeadline: auction.commitDeadline,
+                      revealDeadline: auction.revealDeadline,
+                      minDeposit: auction.minDeposit,
+                      settled: auction.settled,
+                      winner: auction.winner,
+                      winningAmount: auction.winningAmount,
+                      bids: auction.bids.map((b) => ({
+                        bidder: b.bidder,
+                        commitmentHash: Array.isArray(b.commitmentHash)
+                          ? b.commitmentHash.map((x) => x.toString(16).padStart(2, "0")).join("")
+                          : b.commitmentHash,
+                        revealed: b.revealed,
+                        revealedAmount: b.revealedAmount,
+                      })),
+                    }}
+                  />
+                  <div className="mt-2">
+                    <SuiscanLink objectId={auctionId} label="在 Suiscan 查看拍卖对象" />
+                  </div>
+                </>
+              )}
             </div>
           )}
         </PrivacyToggle>
