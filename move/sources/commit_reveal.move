@@ -335,9 +335,6 @@ module suicryptolib::commit_reveal {
     #[test_only]
     use sui::test_scenario;
     #[test_only]
-    use sui::clock;
-
-    #[test_only]
     const ALICE: address = @0xA;
     #[test_only]
     fun make_test_clock(timestamp_ms: u64, ctx: &mut TxContext): Clock {

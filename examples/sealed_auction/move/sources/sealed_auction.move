@@ -309,9 +309,6 @@ module sealed_auction::auction {
     #[test_only]
     use sui::test_scenario;
     #[test_only]
-    use sui::clock;
-
-    #[test_only]
     const ALICE: address = @0xA;
     #[test_only]
     const BOB: address = @0xB;
