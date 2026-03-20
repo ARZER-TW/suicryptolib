@@ -263,7 +263,14 @@ function AuctionView({ auctionId, onBack }) {
           </h1>
         </div>
         <div className="text-right">
-          <p className="text-xs text-zinc-500 font-mono break-all max-w-[200px]">{auctionId}</p>
+          <p className="text-[10px] text-zinc-600 mb-1">拍卖 Object ID (点击复制)</p>
+          <button
+            onClick={() => { navigator.clipboard.writeText(auctionId); }}
+            className="text-xs text-zinc-400 font-mono break-all max-w-[280px] text-left px-2 py-1 rounded bg-zinc-800 border border-zinc-700 hover:border-cyan-600 transition-colors cursor-pointer"
+            title="点击复制 Object ID"
+          >
+            {auctionId}
+          </button>
         </div>
       </div>
 
