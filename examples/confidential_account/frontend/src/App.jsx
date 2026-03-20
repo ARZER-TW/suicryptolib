@@ -96,7 +96,7 @@ function DashboardView({ onSelect }) {
                 <div className="flex justify-between items-center">
                   <span className="text-xs font-mono text-zinc-500">{acc.id?.substring(0, 16)}...</span>
                   <span className="text-sm text-zinc-300">
-                    {secret ? `${secret.value} (private)` : `${(acc.vaultBalance / MIST_PER_SUI).toFixed(2)} SUI locked`}
+                    {secret ? `${(parseInt(secret.value, 10) / MIST_PER_SUI).toFixed(2)} SUI (private)` : `${(acc.vaultBalance / MIST_PER_SUI).toFixed(2)} SUI locked`}
                   </span>
                 </div>
               </button>
@@ -132,12 +132,13 @@ function DepositForm({ onSuccess }) {
     setError("");
 
     try {
-      const senderHash = addressToSenderHash(account.address);
+      const senderHash = await addressToSenderHash(account.address);
       const blinding = generateBlinding();
       const depositMist = amountNum * MIST_PER_SUI;
 
+      // Commitment value must use MIST (same unit as vault balance)
       const result = await generateRangeProof(
-        amount,
+        depositMist.toString(),
         blinding,
         senderHash,
         setProofStage
@@ -155,7 +156,7 @@ function DepositForm({ onSuccess }) {
 
       if (txResult.accountId) {
         saveAccountSecret(txResult.accountId, {
-          value: amount,
+          value: depositMist.toString(),
           blinding,
           senderHash,
         });
@@ -228,7 +229,7 @@ function AccountView({ accountId, onBack }) {
           <div>
             <p className="text-xs text-zinc-600 mb-1 uppercase tracking-wider">Private Balance</p>
             <p className="text-3xl font-semibold text-zinc-100 tabular-nums">
-              {secret ? secret.value : "***"}
+              {secret ? (parseInt(secret.value, 10) / MIST_PER_SUI).toFixed(2) : "***"}
               <span className="text-lg text-zinc-500 ml-1">SUI</span>
             </p>
           </div>
@@ -310,13 +311,15 @@ function WithdrawForm({ accountId, secret, account, onSuccess }) {
     setError("");
 
     try {
-      const newValue = parseInt(secret.value, 10) - withdrawNum;
+      // secret.value is in MIST, withdrawMist is also MIST
+      const currentMist = parseInt(secret.value, 10);
+      const newValue = currentMist - withdrawMist;
       if (newValue < 0) {
         setError("Insufficient private balance");
         return;
       }
 
-      const senderHash = addressToSenderHash(currentAccount.address);
+      const senderHash = await addressToSenderHash(currentAccount.address);
       const newBlinding = generateBlinding();
 
       const result = await generateRangeProof(
