@@ -1,9 +1,12 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { ConnectButton, useCurrentAccount } from "@mysten/dapp-kit";
 import { generateRangeProof, generateBlinding } from "./lib/prover";
 import { addressToSenderHash } from "./lib/sender-hash";
 import { saveAccountSecret, updateAccountSecret, getAccountSecret } from "./lib/local-store";
 import { useDeposit, useWithdraw, useAccountState, useMyAccounts } from "./hooks/use-account";
+import { XRayPanel, createStepTracker } from "./components/XRayPanel";
+import { PrivacyToggle } from "./components/PrivacyToggle";
+import { ModuleTag } from "./components/ModuleTag";
 import "./index.css";
 
 const MIST_PER_SUI = 1_000_000_000;
@@ -116,33 +119,42 @@ function DepositForm({ onSuccess }) {
   const [amount, setAmount] = useState("");
   const [proofStage, setProofStage] = useState("");
   const [error, setError] = useState("");
-
-  const stages = {
-    loading: "加载电路中...",
-    proving: "生成零知识证明中...",
-    converting: "转换为 Sui 格式...",
-    done: "证明已就绪",
-    signing: "请在钱包中签名...",
-  };
+  const [xraySteps, setXraySteps] = useState([]);
+  const [depositDone, setDepositDone] = useState(false);
 
   const handleDeposit = async () => {
     if (!amount || !account?.address) return;
     const amountNum = parseInt(amount, 10);
     if (isNaN(amountNum) || amountNum <= 0) return;
     setError("");
+    setDepositDone(false);
+
+    const tracker = createStepTracker(setXraySteps);
 
     try {
-      const senderHash = await addressToSenderHash(account.address);
+      tracker.add("生成 248-bit 随机 blinding factor");
       const blinding = generateBlinding();
+      tracker.done("OK");
+
+      tracker.add("计算 sender_hash = Poseidon(address)");
+      const senderHash = await addressToSenderHash(account.address);
+      tracker.done("OK");
+
       const depositMist = amountNum * MIST_PER_SUI;
 
+      tracker.add("生成 Groth16 证明 (7,949 约束)...");
       const result = await generateRangeProof(
         depositMist.toString(),
         blinding,
         senderHash,
         setProofStage
       );
+      tracker.done("OK");
 
+      tracker.add("转换为 Sui Arkworks 压缩格式 (128 bytes)");
+      tracker.done("OK");
+
+      tracker.add("PTB: splitCoins + account::deposit()");
       setProofStage("signing");
 
       const txResult = await deposit({
@@ -152,6 +164,13 @@ function DepositForm({ onSuccess }) {
         proofBytes: result.proofBytes,
         depositMist,
       });
+      tracker.done("OK");
+
+      tracker.add("链上执行: range_proof::verify_range_64()");
+      tracker.done("OK");
+
+      tracker.add("BN254 配对验证通过");
+      tracker.done("OK");
 
       if (txResult.accountId) {
         saveAccountSecret(txResult.accountId, {
@@ -161,6 +180,7 @@ function DepositForm({ onSuccess }) {
         });
         setProofStage("");
         setAmount("");
+        setDepositDone(true);
         onSuccess(txResult.accountId);
       }
     } catch (err) {
@@ -194,11 +214,10 @@ function DepositForm({ onSuccess }) {
         </button>
       </div>
 
-      {proofStage && (
-        <div className="mt-3 flex items-center gap-2">
-          <div className="w-3 h-3 rounded-full bg-emerald-500 animate-pulse" />
-          <span className="text-xs text-emerald-400">{stages[proofStage] || proofStage}</span>
-        </div>
+      <XRayPanel steps={xraySteps} />
+
+      {depositDone && (
+        <ModuleTag module="pedersen + range_proof" detail="7,949 约束 | Groth16 on BN254" />
       )}
 
       {error && <p className="mt-3 text-xs text-red-400">{error}</p>}
@@ -222,49 +241,76 @@ function AccountView({ accountId, onBack }) {
         &larr; 返回仪表盘
       </button>
 
-      {/* Balance Card */}
-      <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-6">
-        <div className="flex items-start justify-between mb-6">
-          <div>
-            <p className="text-xs text-zinc-600 mb-1 uppercase tracking-wider">保密余额</p>
-            <p className="text-3xl font-semibold text-zinc-100 tabular-nums">
-              {secret ? (parseInt(secret.value, 10) / MIST_PER_SUI).toFixed(2) : "***"}
-              <span className="text-lg text-zinc-500 ml-1">SUI</span>
-            </p>
-          </div>
-          <div className="text-right">
-            <p className="text-[10px] text-zinc-700 uppercase tracking-wider mb-1">链上金库</p>
-            <p className="text-sm text-zinc-400 tabular-nums">
-              {account ? (account.vaultBalance / MIST_PER_SUI).toFixed(2) : "..."} SUI
-            </p>
-          </div>
-        </div>
+      {/* Balance Card with Privacy Toggle */}
+      <PrivacyToggle>
+        {(isObserver) => (
+          <>
+            <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-6">
+              <div className="flex items-start justify-between mb-6">
+                <div>
+                  <p className="text-xs text-zinc-600 mb-1 uppercase tracking-wider">保密余额</p>
+                  <p className="text-3xl font-semibold text-zinc-100 tabular-nums">
+                    {isObserver
+                      ? "***"
+                      : secret
+                        ? (parseInt(secret.value, 10) / MIST_PER_SUI).toFixed(2)
+                        : "***"}
+                    <span className="text-lg text-zinc-500 ml-1">SUI</span>
+                  </p>
+                </div>
+                <div className="text-right">
+                  <p className="text-[10px] text-zinc-700 uppercase tracking-wider mb-1">链上金库</p>
+                  <p className="text-sm text-zinc-400 tabular-nums">
+                    {account ? (account.vaultBalance / MIST_PER_SUI).toFixed(2) : "..."} SUI
+                  </p>
+                </div>
+              </div>
 
-        <div className="grid grid-cols-2 gap-4 text-xs">
-          <div className="px-3 py-2 rounded bg-zinc-800/60">
-            <p className="text-zinc-600 mb-0.5">累计存入</p>
-            <p className="text-zinc-400 tabular-nums">{account ? (account.totalDeposited / MIST_PER_SUI).toFixed(2) : "..."} SUI</p>
-          </div>
-          <div className="px-3 py-2 rounded bg-zinc-800/60">
-            <p className="text-zinc-600 mb-0.5">累计提取</p>
-            <p className="text-zinc-400 tabular-nums">{account ? (account.totalWithdrawn / MIST_PER_SUI).toFixed(2) : "..."} SUI</p>
-          </div>
-        </div>
-      </div>
+              {!isObserver && (
+                <div className="grid grid-cols-2 gap-4 text-xs">
+                  <div className="px-3 py-2 rounded bg-zinc-800/60">
+                    <p className="text-zinc-600 mb-0.5">累计存入</p>
+                    <p className="text-zinc-400 tabular-nums">{account ? (account.totalDeposited / MIST_PER_SUI).toFixed(2) : "..."} SUI</p>
+                  </div>
+                  <div className="px-3 py-2 rounded bg-zinc-800/60">
+                    <p className="text-zinc-600 mb-0.5">累计提取</p>
+                    <p className="text-zinc-400 tabular-nums">{account ? (account.totalWithdrawn / MIST_PER_SUI).toFixed(2) : "..."} SUI</p>
+                  </div>
+                </div>
+              )}
 
-      {/* On-chain Commitment */}
-      <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-5">
-        <p className="text-xs text-zinc-600 uppercase tracking-wider mb-2">链上承诺 (公开可见)</p>
-        <p className="text-[11px] font-mono text-zinc-600 break-all leading-relaxed">
-          x: {account?.commitmentX ? formatBytes(account.commitmentX) : "..."}
-        </p>
-        <p className="text-[11px] font-mono text-zinc-600 break-all leading-relaxed mt-1">
-          y: {account?.commitmentY ? formatBytes(account.commitmentY) : "..."}
-        </p>
-        <p className="text-[10px] text-zinc-700 mt-2">
-          这是观察者能看到的全部内容。无法从这些坐标推算出实际余额。
-        </p>
-      </div>
+              {isObserver && (
+                <p className="text-[10px] text-amber-500/70 mt-1">
+                  观察者无法看到余额明文，只能看到链上承诺坐标
+                </p>
+              )}
+              {!isObserver && (
+                <p className="text-[10px] text-emerald-500/70 mt-3">
+                  你持有本地密钥 (blinding factor)，可以解读真实余额
+                </p>
+              )}
+            </div>
+
+            {/* On-chain Commitment */}
+            <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-5 mt-6">
+              <p className="text-xs text-zinc-600 uppercase tracking-wider mb-2">
+                链上承诺 {isObserver ? "(这是你能看到的全部)" : "(公开可见)"}
+              </p>
+              <p className="text-[11px] font-mono text-zinc-600 break-all leading-relaxed">
+                x: {account?.commitmentX ? formatBytes(account.commitmentX) : "..."}
+              </p>
+              <p className="text-[11px] font-mono text-zinc-600 break-all leading-relaxed mt-1">
+                y: {account?.commitmentY ? formatBytes(account.commitmentY) : "..."}
+              </p>
+              <p className="text-[10px] text-zinc-700 mt-2">
+                {isObserver
+                  ? "你无法从这些坐标推算出实际余额。Pedersen 承诺具有完美隐藏性。"
+                  : "这是观察者能看到的全部内容。无法从这些坐标推算出实际余额。"}
+              </p>
+            </div>
+          </>
+        )}
+      </PrivacyToggle>
 
       {/* Withdraw */}
       {secret && account && (
@@ -285,14 +331,8 @@ function WithdrawForm({ accountId, secret, account, onSuccess }) {
   const [amount, setAmount] = useState("");
   const [proofStage, setProofStage] = useState("");
   const [error, setError] = useState("");
-
-  const stages = {
-    loading: "加载电路中...",
-    proving: "为新余额生成零知识证明...",
-    converting: "转换为 Sui 格式...",
-    done: "证明已就绪",
-    signing: "请在钱包中签名...",
-  };
+  const [xraySteps, setXraySteps] = useState([]);
+  const [withdrawDone, setWithdrawDone] = useState(false);
 
   const maxWithdraw = account.totalDeposited - account.totalWithdrawn;
 
@@ -308,25 +348,39 @@ function WithdrawForm({ accountId, secret, account, onSuccess }) {
     }
 
     setError("");
+    setWithdrawDone(false);
+
+    const tracker = createStepTracker(setXraySteps);
 
     try {
+      tracker.add("计算新余额");
       const currentMist = parseInt(secret.value, 10);
       const newValue = currentMist - withdrawMist;
       if (newValue < 0) {
         setError("保密余额不足");
         return;
       }
+      tracker.done(`${newValue} MIST`);
+
+      tracker.add("生成新 blinding factor");
+      const newBlinding = generateBlinding();
+      tracker.done("OK");
 
       const senderHash = await addressToSenderHash(currentAccount.address);
-      const newBlinding = generateBlinding();
 
+      tracker.add("为新余额生成 Groth16 证明...");
       const result = await generateRangeProof(
         newValue.toString(),
         newBlinding,
         senderHash,
         setProofStage
       );
+      tracker.done("OK");
 
+      tracker.add("转换为 Sui 格式");
+      tracker.done("OK");
+
+      tracker.add("PTB: account::withdraw(new_commitment, proof)");
       setProofStage("signing");
 
       await withdraw({
@@ -337,6 +391,10 @@ function WithdrawForm({ accountId, secret, account, onSuccess }) {
         proofBytes: result.proofBytes,
         withdrawMist,
       });
+      tracker.done("OK");
+
+      tracker.add("链上验证新余额 range proof");
+      tracker.done("OK");
 
       updateAccountSecret(accountId, {
         value: newValue.toString(),
@@ -345,6 +403,7 @@ function WithdrawForm({ accountId, secret, account, onSuccess }) {
 
       setProofStage("");
       setAmount("");
+      setWithdrawDone(true);
       onSuccess();
     } catch (err) {
       setError(err.message);
@@ -377,11 +436,10 @@ function WithdrawForm({ accountId, secret, account, onSuccess }) {
         </button>
       </div>
 
-      {proofStage && (
-        <div className="mt-3 flex items-center gap-2">
-          <div className="w-3 h-3 rounded-full bg-emerald-500 animate-pulse" />
-          <span className="text-xs text-emerald-400">{stages[proofStage] || proofStage}</span>
-        </div>
+      <XRayPanel steps={xraySteps} />
+
+      {withdrawDone && (
+        <ModuleTag module="range_proof" detail="余额合法性验证" />
       )}
 
       {error && <p className="mt-3 text-xs text-red-400">{error}</p>}

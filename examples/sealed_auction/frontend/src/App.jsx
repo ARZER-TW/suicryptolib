@@ -9,6 +9,9 @@ import {
   useAuctionState,
 } from "./use-auction";
 import { DEFAULT_MIN_DEPOSIT_MIST, PHASE_COMMIT, PHASE_REVEAL, PHASE_SETTLED } from "./config";
+import { XRayPanel, createStepTracker } from "./components/XRayPanel";
+import { PrivacyToggle } from "./components/PrivacyToggle";
+import { ModuleTag } from "./components/ModuleTag";
 import "./index.css";
 
 const PHASE_LABELS = ["承诺阶段", "揭示阶段", "已结算"];
@@ -307,7 +310,7 @@ function AuctionView({ auctionId, onBack }) {
 
         {/* Right: On-chain state */}
         <div className="space-y-6">
-          <OnChainState auction={auction} />
+          <OnChainState auction={auction} auctionId={auctionId} />
           <HowItWorks />
         </div>
       </div>
@@ -321,6 +324,8 @@ function BidPanel({ auctionId, minDeposit, onSuccess }) {
   const { placeBid, loading } = usePlaceBid();
   const [amount, setAmount] = useState("");
   const [status, setStatus] = useState("");
+  const [bidSteps, setBidSteps] = useState([]);
+  const [bidSuccess, setBidSuccess] = useState(false);
 
   const depositSui = minDeposit / 1_000_000_000;
 
@@ -333,18 +338,34 @@ function BidPanel({ auctionId, minDeposit, onSuccess }) {
       return;
     }
 
+    const tracker = createStepTracker(setBidSteps);
+    setBidSuccess(false);
     setStatus("生成承诺哈希...");
 
     // Step 1: Generate salt (32 bytes, CSPRNG)
+    tracker.add("生成 32 字节 CSPRNG 随机盐值");
     const salt = randomBytes(32);
+    tracker.done();
 
     // Step 2: Compute SHA-256(amount_string || salt) CLIENT-SIDE
     // The amount and salt NEVER go on-chain during commit
+    tracker.add("浏览器计算 SHA-256(金额 || 盐值)");
     const valueBytes = new TextEncoder().encode(amount);
     const data = new Uint8Array([...valueBytes, ...salt]);
     const hashHex = await createHash(data);
     const hashBytes = hexToBytes(hashHex);
+    tracker.done();
 
+    tracker.add("PTB: hash_commitment::from_hash(hash, SHA256)");
+    tracker.done();
+
+    tracker.add("PTB: splitCoins(gas, deposit)");
+    tracker.done();
+
+    tracker.add("PTB: auction::place_bid(commitment, deposit)");
+    tracker.done();
+
+    tracker.add("等待钱包签名...");
     setStatus("请在钱包中签名交易...");
 
     try {
@@ -354,11 +375,16 @@ function BidPanel({ auctionId, minDeposit, onSuccess }) {
         commitmentHash: hashBytes,
         depositMist: minDeposit,
       });
+      tracker.done();
+
+      tracker.add("交易已确认");
+      tracker.done();
 
       // Step 4: Save secrets locally for reveal phase
       saveBidSecret(auctionId, amount, bytesToHex(salt));
 
       setStatus(`出价已提交! 金额 ${amount} 已密封。\n承诺哈希: ${hashHex.substring(0, 20)}...`);
+      setBidSuccess(true);
       setAmount("");
       onSuccess();
     } catch (err) {
@@ -396,6 +422,8 @@ function BidPanel({ auctionId, minDeposit, onSuccess }) {
             {status}
           </p>
         )}
+        <XRayPanel steps={bidSteps} />
+        {bidSuccess && <ModuleTag module="hash_commitment" detail="SHA-256 承诺" />}
       </div>
     </div>
   );
@@ -407,6 +435,8 @@ function RevealPanel({ auctionId, bids, onSuccess }) {
   const { revealBid, loading } = useRevealBid();
   const account = useCurrentAccount();
   const [status, setStatus] = useState("");
+  const [revealSteps, setRevealSteps] = useState([]);
+  const [revealSuccess, setRevealSuccess] = useState(false);
 
   const secrets = getBidSecrets(auctionId);
   const myBid = bids.find((b) => b.bidder === account?.address);
@@ -418,11 +448,19 @@ function RevealPanel({ auctionId, bids, onSuccess }) {
   const handleReveal = async () => {
     if (!mySecret) return;
 
+    const tracker = createStepTracker(setRevealSteps);
+    setRevealSuccess(false);
+
+    tracker.add("从本地存储读取金额和盐值");
+
     // Pre-flight: recompute hash locally to verify it matches commitment
     const valueBytes = new TextEncoder().encode(mySecret.amount);
     const saltBytes = hexToBytes(mySecret.saltHex);
     const data = new Uint8Array([...valueBytes, ...saltBytes]);
     const recomputedHash = await createHash(data);
+    tracker.done();
+
+    tracker.add("预检: 重算 SHA-256 验证哈希匹配");
 
     // Debug: show what we're about to send
     const debugInfo = [
@@ -443,7 +481,9 @@ function RevealPanel({ auctionId, bids, onSuccess }) {
         return;
       }
     }
+    tracker.done();
 
+    tracker.add("PTB: auction::reveal_bid(value, salt)");
     setStatus("哈希验证通过，请在钱包中签名揭示交易...");
 
     try {
@@ -452,12 +492,20 @@ function RevealPanel({ auctionId, bids, onSuccess }) {
         valueBytes,
         saltBytes,
       });
+      tracker.done();
+
+      tracker.add("链上执行: hash_commitment::verify_opening()");
+      tracker.done();
+
+      tracker.add("SHA-256(value||salt) 匹配验证通过");
+      tracker.done();
 
       // Mark as revealed locally
       const idx = secrets.indexOf(mySecret);
       markRevealed(auctionId, idx);
 
       setStatus(`已揭示! 出价金额: ${mySecret.amount} SUI`);
+      setRevealSuccess(true);
       onSuccess();
     } catch (err) {
       setStatus(`错误: ${err.message}`);
@@ -494,6 +542,8 @@ function RevealPanel({ auctionId, bids, onSuccess }) {
           {status}
         </pre>
       )}
+      <XRayPanel steps={revealSteps} />
+      {revealSuccess && <ModuleTag module="hash_commitment::verify_opening" detail="链上哈希验证" />}
     </div>
   );
 }
@@ -567,47 +617,72 @@ function SettledPanel({ auction }) {
 
 // --- On-Chain State ---
 
-function OnChainState({ auction }) {
+function OnChainState({ auction, auctionId }) {
+  const account = useCurrentAccount();
+
+  // Try to get local bid secrets for the current user
+  const getMyBidAmount = (bid) => {
+    if (!account) return null;
+    if (bid.bidder !== account.address) return null;
+    const secrets = getBidSecrets(auctionId);
+    if (secrets.length === 0) return null;
+    const secret = secrets.find((s) => !s.revealed);
+    return secret ? secret.amount : null;
+  };
+
   return (
     <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-6">
       <h2 className="text-lg font-semibold mb-4">链上状态</h2>
-      <p className="text-xs text-zinc-500 mb-3">所有人都能在区块链上看到的内容:</p>
 
       {auction.bidCount === 0 ? (
         <p className="text-sm text-zinc-500 italic">暂无出价</p>
       ) : (
-        <div className="space-y-2">
-          {auction.bids.map((bid, i) => (
-            <div key={i} className="px-4 py-3 rounded-lg bg-zinc-800/70 border border-zinc-700/50">
-              <div className="flex justify-between items-center mb-1">
-                <span className="text-xs font-mono text-zinc-400">
-                  {bid.bidder.substring(0, 8)}...{bid.bidder.substring(bid.bidder.length - 6)}
-                </span>
-                <span
-                  className={`text-xs px-2 py-0.5 rounded-full ${
-                    bid.revealed
-                      ? "bg-emerald-900/50 text-emerald-400"
-                      : "bg-amber-900/50 text-amber-400"
-                  }`}
-                >
-                  {bid.revealed ? "已揭示" : "已密封"}
-                </span>
-              </div>
-              <div className="font-mono text-xs text-zinc-500 break-all">
-                {bid.revealed ? (
-                  <span className="text-emerald-400">{bid.revealedAmount}</span>
-                ) : (
-                  <>
-                    <span className="text-zinc-600">commitment: </span>
-                    {Array.isArray(bid.commitmentHash)
-                      ? bid.commitmentHash.slice(0, 8).map((b) => b.toString(16).padStart(2, "0")).join("") + "..."
-                      : "..."}
-                  </>
-                )}
-              </div>
+        <PrivacyToggle>
+          {(isObserver) => (
+            <div className="space-y-2">
+              <p className="text-xs text-zinc-500 mb-3">
+                {isObserver
+                  ? "观察者视角: 只能看到链上公开的承诺哈希"
+                  : "你的视角: 可以看到你自己的出价金额 (来自本地存储)"}
+              </p>
+              {auction.bids.map((bid, i) => {
+                const myAmount = !isObserver ? getMyBidAmount(bid) : null;
+                return (
+                  <div key={i} className="px-4 py-3 rounded-lg bg-zinc-800/70 border border-zinc-700/50">
+                    <div className="flex justify-between items-center mb-1">
+                      <span className="text-xs font-mono text-zinc-400">
+                        {bid.bidder.substring(0, 8)}...{bid.bidder.substring(bid.bidder.length - 6)}
+                      </span>
+                      <span
+                        className={`text-xs px-2 py-0.5 rounded-full ${
+                          bid.revealed
+                            ? "bg-emerald-900/50 text-emerald-400"
+                            : "bg-amber-900/50 text-amber-400"
+                        }`}
+                      >
+                        {bid.revealed ? "已揭示" : "已密封"}
+                      </span>
+                    </div>
+                    <div className="font-mono text-xs text-zinc-500 break-all">
+                      {bid.revealed ? (
+                        <span className="text-emerald-400">{bid.revealedAmount}</span>
+                      ) : myAmount ? (
+                        <span className="text-violet-400">{myAmount} SUI (仅你可见)</span>
+                      ) : (
+                        <>
+                          <span className="text-zinc-600">commitment: </span>
+                          {Array.isArray(bid.commitmentHash)
+                            ? bid.commitmentHash.slice(0, 8).map((b) => b.toString(16).padStart(2, "0")).join("") + "..."
+                            : "..."}
+                        </>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
-          ))}
-        </div>
+          )}
+        </PrivacyToggle>
       )}
     </div>
   );

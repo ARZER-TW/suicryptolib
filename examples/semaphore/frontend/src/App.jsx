@@ -11,6 +11,9 @@ import {
   useGroupState,
   useGroupMembers,
 } from "./hooks/use-semaphore";
+import { XRayPanel, createStepTracker } from "./components/XRayPanel";
+import { PrivacyToggle } from "./components/PrivacyToggle";
+import { ModuleTag } from "./components/ModuleTag";
 import "./index.css";
 
 function App() {
@@ -131,8 +134,14 @@ function GroupView({ groupId, onBack }) {
   const { group, refresh: refreshGroup } = useGroupState(groupId);
   const { members, refresh: refreshMembers } = useGroupMembers(groupId);
   const identity = getIdentity(groupId);
+  const [verifyResult, setVerifyResult] = useState("");
 
   const refreshAll = () => { refreshGroup(); refreshMembers(); };
+
+  // Find current user's member index
+  const myIndex = identity
+    ? members.findIndex((m) => String(m.commitment) === String(identity.commitment))
+    : -1;
 
   return (
     <div className="space-y-6">
@@ -176,26 +185,64 @@ function GroupView({ groupId, onBack }) {
           identity={identity}
           members={members}
           merkleRoot={group?.merkleRoot}
+          onVerified={setVerifyResult}
         />
       )}
 
-      {/* Member List */}
+      {/* Member List with Privacy Toggle */}
       {members.length > 0 && (
         <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-5">
           <p className="text-xs text-zinc-600 uppercase tracking-wider mb-3">链上成员 (身份承诺)</p>
-          <div className="space-y-1.5">
-            {members.map((m, i) => (
-              <div key={i} className="flex justify-between text-[11px] font-mono text-zinc-600">
-                <span>#{m.memberIndex}</span>
-                <span className="break-all max-w-[80%] text-right">
-                  {String(m.commitment).substring(0, 32)}...
-                </span>
+          <PrivacyToggle>
+            {(isObserver) => isObserver ? (
+              <div>
+                <div className="space-y-1.5">
+                  {members.map((m, i) => (
+                    <div key={i} className="flex justify-between text-[11px] font-mono text-zinc-600">
+                      <span>#{m.memberIndex}</span>
+                      <span className="break-all max-w-[80%] text-right">
+                        {String(m.commitment).substring(0, 32)}...
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                <p className="text-[10px] text-amber-500/70 mt-3">
+                  无法将任何承诺与特定用户关联
+                </p>
+                {verifyResult && (
+                  <p className="text-[10px] text-amber-500/70 mt-1">
+                    链上只看到 nullifier_hash，无法确定是谁操作
+                  </p>
+                )}
               </div>
-            ))}
-          </div>
-          <p className="text-[10px] text-zinc-700 mt-3">
-            观察者只能看到这些数字。无法从承诺推算出成员身份。
-          </p>
+            ) : (
+              <div>
+                <div className="space-y-1.5">
+                  {members.map((m, i) => {
+                    const isMe = identity && String(m.commitment) === String(identity.commitment);
+                    return (
+                      <div key={i} className={`flex justify-between text-[11px] font-mono ${isMe ? "text-indigo-400" : "text-zinc-600"}`}>
+                        <span>#{m.memberIndex}{isMe ? " (你)" : ""}</span>
+                        <span className="break-all max-w-[80%] text-right">
+                          {String(m.commitment).substring(0, 32)}...
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+                {identity && myIndex >= 0 && (
+                  <div className="mt-3 space-y-1">
+                    <p className="text-[10px] text-indigo-400">
+                      你是第 {members[myIndex]?.memberIndex} 号成员
+                    </p>
+                    <p className="text-[10px] font-mono text-zinc-600 break-all">
+                      identity commitment: {identity.commitment.toString().substring(0, 32)}...
+                    </p>
+                  </div>
+                )}
+              </div>
+            )}
+          </PrivacyToggle>
         </div>
       )}
     </div>
@@ -208,22 +255,42 @@ function JoinPanel({ groupId, onSuccess }) {
   const { addMember, loading } = useAddMember();
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
+  const [xraySteps, setXraySteps] = useState([]);
+  const [joined, setJoined] = useState(false);
 
   const handleJoin = async () => {
     setError("");
+    setJoined(false);
     setStatus("生成匿名身份...");
+    const tracker = createStepTracker(setXraySteps);
 
     try {
+      tracker.add("生成随机 identity_secret (248-bit)");
+      tracker.done();
+      tracker.add("生成随机 identity_nullifier (248-bit)");
+      tracker.done();
+
+      tracker.add("计算 Poseidon(secret, nullifier) = identity commitment");
       const identity = await createIdentity();
+      tracker.done();
+
       setStatus("提交身份承诺到链上...");
+      tracker.add("PTB: semaphore::add_member(commitment)");
 
       await addMember({
         groupId,
         commitment: identity.commitment,
       });
+      tracker.done();
+
+      tracker.add("链上 Incremental Merkle Tree 更新 (8 层 Poseidon hash)");
+      tracker.done();
+      tracker.add("新 Merkle root 已计算");
+      tracker.done();
 
       saveIdentity(groupId, identity);
       setStatus("");
+      setJoined(true);
       onSuccess();
     } catch (err) {
       setError(err.message);
@@ -251,6 +318,10 @@ function JoinPanel({ groupId, onSuccess }) {
           <span className="text-xs text-indigo-400">{status}</span>
         </div>
       )}
+      <XRayPanel steps={xraySteps} />
+      {joined && (
+        <ModuleTag module="semaphore + merkle_poseidon" detail="Poseidon Incremental Merkle Tree" />
+      )}
       {error && <p className="text-xs text-red-400">{error}</p>}
     </div>
   );
@@ -258,12 +329,14 @@ function JoinPanel({ groupId, onSuccess }) {
 
 // --- Anonymous Action ---
 
-function AnonymousAction({ groupId, identity, members, merkleRoot }) {
+function AnonymousAction({ groupId, identity, members, merkleRoot, onVerified }) {
   const { verifyProof, loading: txLoading } = useVerifyProof();
   const [extNullifier, setExtNullifier] = useState("");
   const [proofStage, setProofStage] = useState("");
   const [result, setResult] = useState("");
   const [error, setError] = useState("");
+  const [xraySteps, setXraySteps] = useState([]);
+  const [verified, setVerified] = useState(false);
 
   const stages = {
     building: "构建 Poseidon Merkle 树...",
@@ -277,13 +350,20 @@ function AnonymousAction({ groupId, identity, members, merkleRoot }) {
     if (!extNullifier) return;
     setError("");
     setResult("");
+    setVerified(false);
+    const tracker = createStepTracker(setXraySteps);
 
     try {
       setProofStage("building");
 
+      tracker.add("从链上事件读取成员列表");
       // Build tree from on-chain members
       const commitments = members.map((m) => BigInt(m.commitment));
+      tracker.done();
+
+      tracker.add(`构建 Poseidon Merkle 树 (8 层, ${commitments.length} 个成员)`);
       const tree = await buildMerkleTree(commitments, TREE_DEPTH);
+      tracker.done();
 
       // Find my leaf index
       const myIndex = commitments.findIndex((c) => c === identity.commitment);
@@ -293,9 +373,15 @@ function AnonymousAction({ groupId, identity, members, merkleRoot }) {
         return;
       }
 
+      tracker.add("计算 Merkle proof (path_elements + path_indices)");
       const merkleProof = generateMerkleProof(tree, myIndex);
+      tracker.done();
+
+      tracker.add("计算 nullifier_hash = Poseidon(nullifier_key, external_nullifier)");
+      tracker.done();
 
       // Generate ZK proof
+      tracker.add("生成 Groth16 证明 (2,454 约束)...");
       const proofResult = await generateSemaphoreProof({
         identity,
         merkleProof,
@@ -303,8 +389,13 @@ function AnonymousAction({ groupId, identity, members, merkleRoot }) {
         externalNullifier: BigInt(extNullifier),
         onProgress: setProofStage,
       });
+      tracker.done();
+
+      tracker.add("转换为 Sui Arkworks 格式 (128 bytes)");
+      tracker.done();
 
       setProofStage("signing");
+      tracker.add("PTB: semaphore::verify_proof(root, nullifier, proof)");
 
       await verifyProof({
         groupId,
@@ -313,9 +404,15 @@ function AnonymousAction({ groupId, identity, members, merkleRoot }) {
         externalNullifier: proofResult.externalNullifier,
         proofBytes: proofResult.proofBytes,
       });
+      tracker.done();
+
+      tracker.add("链上: Groth16 验证通过 + nullifier 已记录");
+      tracker.done();
 
       setResult("验证成功! 你已匿名证明了群组成员身份。");
+      setVerified(true);
       setProofStage("");
+      onVerified?.("success");
     } catch (err) {
       if (err.message?.includes("NullifierAlreadyUsed") || err.message?.includes("abort_code: 2")) {
         setError("此 nullifier 已使用过 -- 你不能对同一个场景重复操作");
@@ -358,6 +455,10 @@ function AnonymousAction({ groupId, identity, members, merkleRoot }) {
           <div className="w-2.5 h-2.5 rounded-full bg-indigo-500 animate-pulse" />
           <span className="text-xs text-indigo-400">{stages[proofStage] || proofStage}</span>
         </div>
+      )}
+      <XRayPanel steps={xraySteps} />
+      {verified && (
+        <ModuleTag module="semaphore::verify_proof" detail="2,454 约束 | 匿名成员证明" />
       )}
       {result && <p className="text-xs text-emerald-400">{result}</p>}
       {error && <p className="text-xs text-red-400">{error}</p>}
