@@ -133,10 +133,14 @@ function HomeView({ onEnterGroup }) {
 function GroupView({ groupId, onBack }) {
   const { group, refresh: refreshGroup } = useGroupState(groupId);
   const { members, refresh: refreshMembers } = useGroupMembers(groupId);
-  const identity = getIdentity(groupId);
+  const [identity, setIdentity] = useState(() => getIdentity(groupId));
   const [verifyResult, setVerifyResult] = useState("");
 
-  const refreshAll = () => { refreshGroup(); refreshMembers(); };
+  const refreshAll = () => {
+    refreshGroup();
+    refreshMembers();
+    setIdentity(getIdentity(groupId));
+  };
 
   // Find current user's member index
   const myIndex = identity
