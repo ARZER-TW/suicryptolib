@@ -330,7 +330,190 @@ suicryptolib/
 
 ---
 
-## 十、未完成的工作
+## 十、面向 Sui 工程师的技术说明
+
+> 本节面向熟悉 Sui、会写 Move 的工程师，用技术语言说明 SuiCryptoLib 到底做了什么、怎么做的、为什么这样做。
+
+### 10.1 Sui 原生提供了什么 vs SuiCryptoLib 补了什么
+
+Sui Framework 提供的是**原始工具**：
+
+| Sui 原生 | 能力 | 限制 |
+|----------|------|------|
+| `std::hash::sha2_256` | 算 SHA-256 | 只是一个哈希函数，不管 commitment 语义 |
+| `sui::hash::keccak256` / `blake2b256` | 其他哈希 | 同上 |
+| `sui::groth16::verify_groth16_proof` | 验证 Groth16 证明 | 只做 pairing check，不管电路逻辑 |
+| `sui::poseidon::poseidon_bn254` | 算 Poseidon 哈希 | 输入是 `vector<u256>` 域元素，不是字节 |
+
+SuiCryptoLib 补的是**组合模式**：
+
+```move
+// 没有 SuiCryptoLib：你得自己拼
+let mut data = vector::empty<u8>();
+vector::append(&mut data, value);
+vector::append(&mut data, salt);
+assert!(vector::length(&salt) >= 16, ESaltTooShort); // 自己记得检查
+let hash = std::hash::sha2_256(data);
+// 然后自己定义 Commitment struct、自己管理 scheme 选择...
+
+// 有 SuiCryptoLib：
+use suicryptolib::hash_commitment;
+let commitment = hash_commitment::compute(value, salt, 0);
+let valid = hash_commitment::verify_opening(&commitment, value, salt);
+```
+
+这只是最简单的例子。往上还有 Merkle proof 验证（含 domain separation 防第二前像攻击）、Poseidon Merkle（与 circomlib 一致的参数）、以及 Pedersen commitment 和 Range proof（走 Groth16 桥接到 Circom 电路）。
+
+### 10.2 Groth16 桥接架构
+
+Sui Move 没有 BabyJubJub 曲线运算。Pedersen 和 Range Proof 需要椭圆曲线标量乘法，纯 Move 实现的 gas 成本不可接受。
+
+解决方案是 **Circom → snarkjs → Sui Groth16** 管线：
+
+```
+链下 (用户浏览器/服务端)                    链上 (Sui Move)
+┌─────────────────────────┐               ┌────────────────────────────┐
+│ Circom 电路              │               │ pedersen.move              │
+│  - EscalarMulFix(253, G) │  snarkjs      │                            │
+│  - EscalarMulFix(253, H) │ fullProve()   │  verify_commitment_proof() │
+│  - BabyAdd               │ ──────────→   │    groth16::verify(        │
+│  - Num2Bits(64)          │  proof bytes  │      &pvk, &inputs, &proof │
+│                          │               │    )                       │
+└─────────────────────────┘               └────────────────────────────┘
+```
+
+**格式转换**是最关键的工程难点。snarkjs 输出非压缩 affine 坐标（JSON 大整数），Sui 要的是 Arkworks compressed 格式：
+
+- **G1 点**：32 bytes，x 坐标 little-endian，最高位存 y 的符号位
+- **G2 点**：64 bytes，Fp2 的 c0 和 c1 分量各 32 bytes LE
+- **VK 布局**：alpha(G1, 32B) + beta(G2, 64B) + gamma(G2, 64B) + delta(G2, 64B) + IC_count(u64 LE, 8B) + IC_points(N x G1)
+- **Proof 布局**：pi_a(G1, 32B) + pi_b(G2, 64B) + pi_c(G1, 32B) = 固定 128 bytes
+- **Public inputs**：每个信号 32 bytes LE（BN254 标量域元素）
+
+这套转换在 `circuits/poc/format_for_sui.mjs` 中建立，经过 PoC 验证后用于 Pedersen 和 Range Proof 的生产电路。
+
+### 10.3 Poseidon 一致性问题
+
+Poseidon 哈希有很多参数变体（t 值、round 数 RF/RP、MDS 矩阵、S-box 指数）。circomlib 用的参数组和 Sui 内置的 `poseidon_bn254` 必须完全一致，否则链上链下的 Merkle root 对不上。
+
+验证方法：用 circomlib 的 `buildPoseidon()` 计算 5 个参考向量（1 到 5 个输入），然后在 Move 测试中用 `sui::poseidon::poseidon_bn254()` 算同样的输入，`assert!` 结果相等。
+
+```move
+// poseidon_poc.move 中的一个测试
+#[test]
+fun test_poseidon_single_input() {
+    let input = vector[1u256];
+    let result = poseidon::poseidon_bn254(&input);
+    // 这个值来自 circomlib JS: buildPoseidon()([1])
+    assert!(result == 18586133768512220936620570745912940619677854269274689475585506675881198879027u256, 0);
+}
+```
+
+5 个值全部匹配，确认 Sui 和 circomlib 用的是同一组 Poseidon 参数。
+
+### 10.4 Demo 中的链上调用链
+
+密封拍卖的每个用户操作对应的链上调用：
+
+**出价（Programmable Transaction Block）：**
+
+```typescript
+const tx = new Transaction();
+
+// Step 1: 前端已在浏览器用 crypto.subtle.digest("SHA-256") 算好 hash
+// hash 是 SHA-256(amount_string || salt_32bytes)，共 32 bytes
+
+// Step 2: PTB 第一条指令 — 创建 Commitment 对象（不是 Sui object，是纯值）
+const [commitment] = tx.moveCall({
+  target: `${LIB}::hash_commitment::from_hash`,
+  arguments: [
+    tx.pure(bcs.vector(bcs.u8()).serialize(hashBytes)),  // 32 bytes hash
+    tx.pure(bcs.u8().serialize(0)),                       // scheme=SHA256
+  ],
+});
+
+// Step 3: PTB 第二条指令 — 从 gas coin 分出押金
+const [deposit] = tx.splitCoins(tx.gas, [
+  tx.pure(bcs.u64().serialize(minDepositMist)),
+]);
+
+// Step 4: PTB 第三条指令 — 调用 place_bid
+// commitment 是 Step 2 的返回值（Commitment struct，非 object）
+// deposit 是 Step 3 的返回值（Coin<SUI>）
+tx.moveCall({
+  target: `${AUCTION}::auction::place_bid`,
+  arguments: [
+    tx.object(auctionId),     // Auction 共享对象
+    commitment,                // 纯值传递，不是 object reference
+    deposit,                   // Coin<SUI>
+    tx.object("0x6"),          // Clock 共享对象
+  ],
+});
+
+// 一个 PTB，三条指令，一次签名
+await signAndExecute({ transaction: tx });
+```
+
+**揭示：**
+
+```typescript
+const tx = new Transaction();
+tx.moveCall({
+  target: `${AUCTION}::auction::reveal_bid`,
+  arguments: [
+    tx.object(auctionId),
+    tx.pure(bcs.vector(bcs.u8()).serialize(valueBytes)),  // "500" → [53,48,48]
+    tx.pure(bcs.vector(bcs.u8()).serialize(saltBytes)),    // 32 bytes 原始盐
+    tx.object("0x6"),
+  ],
+});
+// Move 内部: hash_commitment::verify_opening(&commitment, value, salt)
+// 重算 sha2_256(value || salt)，比对链上存的 hash
+```
+
+**关键安全属性：** 出价时 `value` 和 `salt` 只存在于浏览器 localStorage，不出现在任何交易数据中。链上只有 32 bytes SHA-256 hash。揭示时 `value` 和 `salt` 才上链，此时承诺阶段已结束，其他人看到也无法修改自己的出价。
+
+### 10.5 Commitment 类型在 PTB 中的传递
+
+`Commitment` struct 的定义：
+
+```move
+public struct Commitment has store, copy, drop {
+    hash: vector<u8>,
+    scheme: u8,
+}
+```
+
+它有 `store + copy + drop`，**没有 `key`**，所以不是 Sui object。在 PTB 中，`from_hash()` 的返回值是一个纯值（pure value），可以直接作为下一条 `moveCall` 的参数传递。SDK 中用 `const [commitment] = tx.moveCall(...)` 解构取第一个返回值。
+
+### 10.6 为什么不能用 `compute()` 在链上算 hash？
+
+```move
+// 如果在 PTB 中调用 compute()：
+tx.moveCall({
+  target: `${LIB}::hash_commitment::compute`,
+  arguments: [
+    tx.pure(bcs.vector(bcs.u8()).serialize("500")),  // ← 金额明文！
+    tx.pure(bcs.vector(bcs.u8()).serialize(salt)),    // ← 盐值明文！
+    tx.pure(bcs.u8().serialize(0)),
+  ],
+});
+```
+
+交易数据是公开的。任何人检查这笔交易的 `input_objects` 就能看到 `"500"` 和 `salt`。承诺的隐藏性完全失效。
+
+所以必须在客户端算好 hash，只传 hash 上链：
+
+```move
+// 正确做法：浏览器算 hash，链上只存 hash
+from_hash(hash_bytes, 0)  // 链上只看到 32 bytes 的 hash，无法反推
+```
+
+`from_hash()` 这个函数就是为这个场景设计的 — 让客户端预计算 hash，链上只做存储和后续验证。
+
+---
+
+## 十一、未完成的工作（Remaining Work）
 
 | 项目 | 状态 | 说明 |
 |------|------|------|
@@ -341,7 +524,7 @@ suicryptolib/
 
 ---
 
-## 十一、Git 历程
+## 十二、Git 历程
 
 | Commit | 里程碑 |
 |--------|--------|
