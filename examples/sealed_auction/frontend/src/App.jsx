@@ -356,29 +356,16 @@ function BidPanel({ auctionId, minDeposit, onSuccess }) {
     const hashBytes = hexToBytes(hashHex);
     tracker.done();
 
-    tracker.add("PTB: hash_commitment::from_hash(hash, SHA256)");
-    tracker.done();
-
-    tracker.add("PTB: splitCoins(gas, deposit)");
-    tracker.done();
-
-    tracker.add("PTB: auction::place_bid(commitment, deposit)");
-    tracker.done();
-
-    tracker.add("等待钱包签名...");
+    tracker.add("构建 PTB: from_hash + splitCoins + place_bid → 等待钱包签名...");
     setStatus("请在钱包中签名交易...");
 
     try {
-      // Step 3: Send ONLY the hash + deposit on-chain
       await placeBid({
         auctionId,
         commitmentHash: hashBytes,
         depositMist: minDeposit,
       });
-      tracker.done();
-
-      tracker.add("交易已确认");
-      tracker.done();
+      tracker.done("交易已确认");
 
       // Step 4: Save secrets locally for reveal phase
       saveBidSecret(auctionId, amount, bytesToHex(salt));
@@ -492,13 +479,7 @@ function RevealPanel({ auctionId, bids, onSuccess }) {
         valueBytes,
         saltBytes,
       });
-      tracker.done();
-
-      tracker.add("链上执行: hash_commitment::verify_opening()");
-      tracker.done();
-
-      tracker.add("SHA-256(value||salt) 匹配验证通过");
-      tracker.done();
+      tracker.done("交易成功 (合约内部验证 hash 匹配)");
 
       // Mark as revealed locally
       const idx = secrets.indexOf(mySecret);

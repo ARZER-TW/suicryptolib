@@ -269,14 +269,9 @@ function JoinPanel({ groupId, onSuccess }) {
     const tracker = createStepTracker(setXraySteps);
 
     try {
-      tracker.add("生成随机 identity_secret (248-bit)");
-      tracker.done();
-      tracker.add("生成随机 identity_nullifier (248-bit)");
-      tracker.done();
-
-      tracker.add("计算 Poseidon(secret, nullifier) = identity commitment");
+      tracker.add("生成随机身份密钥 + 计算 Poseidon 承诺...");
       const identity = await createIdentity();
-      tracker.done();
+      tracker.done("identity_secret + identity_nullifier + Poseidon(s, n)");
 
       setStatus("提交身份承诺到链上...");
       tracker.add("PTB: semaphore::add_member(commitment)");
@@ -285,12 +280,7 @@ function JoinPanel({ groupId, onSuccess }) {
         groupId,
         commitment: identity.commitment,
       });
-      tracker.done();
-
-      tracker.add("链上 Incremental Merkle Tree 更新 (8 层 Poseidon hash)");
-      tracker.done();
-      tracker.add("新 Merkle root 已计算");
-      tracker.done();
+      tracker.done("交易成功 (合约内部更新 Incremental Merkle Tree)");
 
       saveIdentity(groupId, identity);
       setStatus("");
@@ -381,11 +371,8 @@ function AnonymousAction({ groupId, identity, members, merkleRoot, onVerified })
       const merkleProof = generateMerkleProof(tree, myIndex);
       tracker.done();
 
-      tracker.add("计算 nullifier_hash = Poseidon(nullifier_key, external_nullifier)");
-      tracker.done();
-
-      // Generate ZK proof
-      tracker.add("生成 Groth16 证明 (2,454 约束)...");
+      // Generate ZK proof (includes nullifier_hash computation + format conversion)
+      tracker.add("计算 nullifier_hash + 生成 Groth16 证明 (2,454 约束) + 转换格式...");
       const proofResult = await generateSemaphoreProof({
         identity,
         merkleProof,
@@ -393,10 +380,7 @@ function AnonymousAction({ groupId, identity, members, merkleRoot, onVerified })
         externalNullifier: BigInt(extNullifier),
         onProgress: setProofStage,
       });
-      tracker.done();
-
-      tracker.add("转换为 Sui Arkworks 格式 (128 bytes)");
-      tracker.done();
+      tracker.done("Poseidon nullifier + snarkjs fullProve + Arkworks 128 bytes");
 
       setProofStage("signing");
       tracker.add("PTB: semaphore::verify_proof(root, nullifier, proof)");
@@ -408,10 +392,7 @@ function AnonymousAction({ groupId, identity, members, merkleRoot, onVerified })
         externalNullifier: proofResult.externalNullifier,
         proofBytes: proofResult.proofBytes,
       });
-      tracker.done();
-
-      tracker.add("链上: Groth16 验证通过 + nullifier 已记录");
-      tracker.done();
+      tracker.done("交易成功 (合约内部 Groth16 验证 + nullifier 记录)");
 
       setResult("验证成功! 你已匿名证明了群组成员身份。");
       setVerified(true);

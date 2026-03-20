@@ -151,10 +151,7 @@ function DepositForm({ onSuccess }) {
       );
       tracker.done("OK");
 
-      tracker.add("转换为 Sui Arkworks 压缩格式 (128 bytes)");
-      tracker.done("OK");
-
-      tracker.add("PTB: splitCoins + account::deposit()");
+      tracker.add("PTB: splitCoins + account::deposit() → 等待钱包签名...");
       setProofStage("signing");
 
       const txResult = await deposit({
@@ -164,13 +161,7 @@ function DepositForm({ onSuccess }) {
         proofBytes: result.proofBytes,
         depositMist,
       });
-      tracker.done("OK");
-
-      tracker.add("链上执行: range_proof::verify_range_64()");
-      tracker.done("OK");
-
-      tracker.add("BN254 配对验证通过");
-      tracker.done("OK");
+      tracker.done("交易成功 (合约内部执行 Groth16 验证)");
 
       if (txResult.accountId) {
         saveAccountSecret(txResult.accountId, {
@@ -229,7 +220,12 @@ function DepositForm({ onSuccess }) {
 
 function AccountView({ accountId, onBack }) {
   const { account, loading, refresh } = useAccountState(accountId);
-  const secret = getAccountSecret(accountId);
+  const [secret, setSecret] = useState(() => getAccountSecret(accountId));
+
+  const refreshAll = () => {
+    refresh();
+    setSecret(getAccountSecret(accountId));
+  };
 
   if (!account && loading) {
     return <p className="text-zinc-500 text-center py-16 text-sm">加载账户数据...</p>;
@@ -314,7 +310,7 @@ function AccountView({ accountId, onBack }) {
 
       {/* Withdraw */}
       {secret && account && (
-        <WithdrawForm accountId={accountId} secret={secret} account={account} onSuccess={refresh} />
+        <WithdrawForm accountId={accountId} secret={secret} account={account} onSuccess={refreshAll} />
       )}
 
       {/* Object ID */}
@@ -377,10 +373,7 @@ function WithdrawForm({ accountId, secret, account, onSuccess }) {
       );
       tracker.done("OK");
 
-      tracker.add("转换为 Sui 格式");
-      tracker.done("OK");
-
-      tracker.add("PTB: account::withdraw(new_commitment, proof)");
+      tracker.add("PTB: account::withdraw(new_commitment, proof) → 等待钱包签名...");
       setProofStage("signing");
 
       await withdraw({
@@ -391,10 +384,7 @@ function WithdrawForm({ accountId, secret, account, onSuccess }) {
         proofBytes: result.proofBytes,
         withdrawMist,
       });
-      tracker.done("OK");
-
-      tracker.add("链上验证新余额 range proof");
-      tracker.done("OK");
+      tracker.done("交易成功 (合约内部验证 range proof)");
 
       updateAccountSecret(accountId, {
         value: newValue.toString(),

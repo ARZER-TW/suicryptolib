@@ -8,7 +8,7 @@ export function XRayPanel({ steps }) {
   return (
     <details className="mt-3 rounded-md border border-zinc-800 bg-zinc-950/80 overflow-hidden">
       <summary className="px-3 py-2 text-[11px] text-zinc-500 cursor-pointer hover:text-zinc-400 select-none">
-        底层过程 (技术透视)
+        执行流程 (技术透视)
       </summary>
       <div className="px-3 pb-3 space-y-1.5">
         {steps.map((step, i) => (
