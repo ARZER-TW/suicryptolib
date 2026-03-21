@@ -117,7 +117,7 @@ export function useAccountState(accountId) {
           commitmentY: f.commitment?.fields?.point_y,
           totalDeposited: parseInt(f.total_deposited, 10),
           totalWithdrawn: parseInt(f.total_withdrawn, 10),
-          vaultBalance: parseInt(f.vault?.fields?.value || "0", 10),
+          vaultBalance: parseInt(typeof f.vault === "string" ? f.vault : (f.vault?.fields?.value || "0"), 10),
         });
       }
     } catch (_) {
@@ -182,6 +182,6 @@ function parseAccountFields(f) {
     owner: f.owner,
     totalDeposited: parseInt(f.total_deposited, 10),
     totalWithdrawn: parseInt(f.total_withdrawn, 10),
-    vaultBalance: parseInt(f.vault?.fields?.value || "0", 10),
+    vaultBalance: parseInt(typeof f.vault === "string" ? f.vault : (f.vault?.fields?.value || "0"), 10),
   };
 }
