@@ -142,6 +142,7 @@ function DepositForm({ onSuccess }) {
   const [proofStage, setProofStage] = useState("");
   const [error, setError] = useState("");
   const [depositDetail, setDepositDetail] = useState(null);
+  const [createdAccountId, setCreatedAccountId] = useState(null);
 
   const handleDeposit = async () => {
     if (!amount || !account?.address) return;
@@ -188,7 +189,7 @@ function DepositForm({ onSuccess }) {
         setProofStage("");
         setAmount("");
         setDepositDetail({ senderHashTime, proofTime, amount: amountNum });
-        onSuccess(txResult.accountId);
+        setCreatedAccountId(txResult.accountId);
       }
     } catch (err) {
       setError(err.message);
@@ -239,6 +240,14 @@ function DepositForm({ onSuccess }) {
             ]}
           />
           <ModuleTag module="pedersen + range_proof" detail="7,949 约束 | Groth16 on BN254" />
+          {createdAccountId && (
+            <button
+              onClick={() => onSuccess(createdAccountId)}
+              className="mt-3 w-full py-2 rounded-md bg-emerald-600 text-white text-sm font-medium hover:bg-emerald-500 transition-colors"
+            >
+              查看账户
+            </button>
+          )}
         </>
       )}
 

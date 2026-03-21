@@ -74,12 +74,17 @@ function HomeView({ onEnterGroup }) {
   const { createGroup, loading } = useCreateGroup();
   const [joinId, setJoinId] = useState("");
   const [error, setError] = useState("");
+  const [createDetail, setCreateDetail] = useState(false);
+  const [createdGroupId, setCreatedGroupId] = useState(null);
 
   const handleCreate = async () => {
     setError("");
     try {
       const result = await createGroup();
-      if (result.groupId) onEnterGroup(result.groupId);
+      if (result.groupId) {
+        setCreateDetail(true);
+        setCreatedGroupId(result.groupId);
+      }
     } catch (err) {
       setError(err.message);
     }
@@ -103,6 +108,28 @@ function HomeView({ onEnterGroup }) {
           >
             {loading ? "创建中..." : "创建群组 (签名交易)"}
           </button>
+          {createDetail && (
+            <>
+              <OperationDetail
+                browserSteps={[
+                  { label: "构建 PTB: semaphore::create_group(depth=8)", detail: "签名交易" },
+                ]}
+                privacyNote={false}
+                chainSteps={[
+                  { label: "创建 Group 共享对象", detail: "" },
+                  { label: `初始化 Incremental Merkle Tree`, detail: `深度 ${TREE_DEPTH}` },
+                  { label: `最大成员数: ${1 << TREE_DEPTH}`, detail: "" },
+                  { label: "预计算每层零值 Poseidon hash", detail: `${TREE_DEPTH} 层` },
+                ]}
+              />
+              <button
+                onClick={() => onEnterGroup(createdGroupId)}
+                className="mt-2 w-full py-2 rounded-md bg-indigo-600 text-white text-sm font-medium hover:bg-indigo-500 transition-colors"
+              >
+                进入群组
+              </button>
+            </>
+          )}
         </div>
 
         <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-5 space-y-3">

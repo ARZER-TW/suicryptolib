@@ -23,14 +23,16 @@ export function OperationDetail({ title, browserSteps, privacyNote, chainSteps }
           ))}
         </div>
 
-        {/* Privacy boundary */}
-        <div className="my-2.5 flex items-center gap-2">
-          <div className="flex-1 border-t border-dashed border-amber-700/50" />
-          <span className="text-[10px] text-amber-500/80 shrink-0 px-1">
-            {privacyNote || "秘密数据永远不跨越此线"}
-          </span>
-          <div className="flex-1 border-t border-dashed border-amber-700/50" />
-        </div>
+        {/* Privacy boundary (optional) */}
+        {privacyNote !== false && (
+          <div className="my-2.5 flex items-center gap-2">
+            <div className="flex-1 border-t border-dashed border-amber-700/50" />
+            <span className="text-[10px] text-amber-500/80 shrink-0 px-1">
+              {privacyNote || "秘密数据永远不跨越此线"}
+            </span>
+            <div className="flex-1 border-t border-dashed border-amber-700/50" />
+          </div>
+        )}
 
         {/* Chain section */}
         <p className="text-zinc-500 mb-1.5">Sui 链上</p>

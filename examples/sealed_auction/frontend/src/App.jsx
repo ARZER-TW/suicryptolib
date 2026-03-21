@@ -128,6 +128,8 @@ function HomeView({ onCreated, onJoin }) {
   const [commitMinutes, setCommitMinutes] = useState("5");
   const [revealMinutes, setRevealMinutes] = useState("5");
   const [joinId, setJoinId] = useState("");
+  const [createDetail, setCreateDetail] = useState(null);
+  const [createdAuctionId, setCreatedAuctionId] = useState(null);
 
   const handleCreate = async () => {
     if (!itemName) return;
@@ -146,7 +148,8 @@ function HomeView({ onCreated, onJoin }) {
     });
 
     if (result.auctionId) {
-      onCreated(result.auctionId);
+      setCreateDetail({ itemName, cm, rm });
+      setCreatedAuctionId(result.auctionId);
     }
   };
 
@@ -201,6 +204,28 @@ function HomeView({ onCreated, onJoin }) {
             >
               {creating ? "创建中..." : "创建拍卖 (签名交易)"}
             </button>
+            {createDetail && (
+              <>
+                <OperationDetail
+                  browserSteps={[
+                    { label: "构建 PTB: auction::create_auction()", detail: "签名交易" },
+                  ]}
+                  privacyNote={false}
+                  chainSteps={[
+                    { label: `创建 Auction 共享对象`, detail: createDetail.itemName },
+                    { label: `承诺阶段: ${createDetail.cm} 分钟`, detail: "" },
+                    { label: `揭示阶段: ${createDetail.rm} 分钟`, detail: "" },
+                    { label: `最低押金: ${DEPOSIT_SUI} SUI`, detail: "" },
+                  ]}
+                />
+                <button
+                  onClick={() => onCreated(createdAuctionId)}
+                  className="mt-2 w-full py-2 rounded-lg bg-gradient-to-r from-violet-600 to-cyan-600 text-white text-sm font-medium hover:from-violet-500 hover:to-cyan-500 transition-all"
+                >
+                  进入拍卖
+                </button>
+              </>
+            )}
           </div>
         </div>
 
@@ -553,12 +578,14 @@ function RevealPanel({ auctionId, bids, onSuccess }) {
 function SettleButton({ auctionId, onSuccess }) {
   const { settle, loading } = useSettleAuction();
   const [status, setStatus] = useState("");
+  const [settled, setSettled] = useState(false);
 
   const handleSettle = async () => {
     setStatus("请在钱包中签名结算交易...");
     try {
       await settle({ auctionId });
       setStatus("拍卖已结算!");
+      setSettled(true);
       onSuccess();
     } catch (err) {
       setStatus(`错误: ${err.message}`);
@@ -569,16 +596,29 @@ function SettleButton({ auctionId, onSuccess }) {
     <div className="space-y-2">
       <button
         onClick={handleSettle}
-        disabled={loading}
+        disabled={loading || settled}
         className="w-full py-2.5 rounded-lg border border-zinc-700 text-zinc-300 hover:bg-zinc-800 disabled:opacity-30 transition-colors text-sm"
       >
-        {loading ? "等待签名..." : "结算拍卖 (签名交易)"}
+        {loading ? "等待签名..." : settled ? "已结算" : "结算拍卖 (签名交易)"}
       </button>
-      <p className="text-xs text-zinc-500 text-center">需在揭示截止后调用</p>
+      {!settled && <p className="text-xs text-zinc-500 text-center">需在揭示截止后调用</p>}
       {status && (
         <p className={`text-xs text-center ${status.startsWith("错误") ? "text-red-400" : "text-cyan-400"}`}>
           {status}
         </p>
+      )}
+      {settled && (
+        <OperationDetail
+          browserSteps={[
+            { label: "构建 PTB: auction::settle()", detail: "签名交易" },
+          ]}
+          privacyNote={false}
+          chainSteps={[
+            { label: "比较所有已揭示出价金额", detail: "" },
+            { label: "最高出价者获胜", detail: "" },
+            { label: "退还失败者押金，没收未揭示者押金", detail: "" },
+          ]}
+        />
       )}
     </div>
   );
