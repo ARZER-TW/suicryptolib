@@ -33,10 +33,10 @@ function App() {
       <main className="max-w-3xl mx-auto px-6 py-10">
         {!account ? (
           <div className="py-20 text-center">
-            <h1 className="text-2xl font-semibold mb-3 text-zinc-100">Sui 链上隐私余额</h1>
+            <h1 className="text-2xl font-semibold mb-3 text-zinc-100">Groth16 零知识证明 Demo</h1>
             <p className="text-zinc-500 mb-8 max-w-md mx-auto text-[15px] leading-relaxed">
-              将 SUI 存入保密账户，余额隐藏在 Pedersen 承诺中，
-              由 Groth16 零知识证明验证。没有人能看到你的实际余额。
+              展示 Pedersen 承诺和 Range Proof 在 Sui 链上的完整验证流程。
+              浏览器生成 Groth16 证明，链上执行 BN254 配对验证。
             </p>
             <ConnectButton />
           </div>
@@ -58,7 +58,28 @@ function App() {
         )}
       </main>
 
-      <footer className="border-t border-zinc-800/40 py-6 text-center">
+      {account && (
+        <div className="max-w-3xl mx-auto px-6 mt-10">
+          <div className="rounded-lg border border-zinc-800 bg-zinc-900/30 p-5">
+            <p className="text-xs font-medium text-zinc-400 mb-2">关于本 Demo</p>
+            <p className="text-[11px] text-zinc-500 leading-relaxed">
+              本 Demo 展示的是 Pedersen 承诺和 Range Proof 在 Sui 链上的<strong className="text-zinc-400">验证能力</strong>，
+              而非完整的保密转账系统。当前设计中，链上金库余额 (vault) 是公开可见的 — 观察者能看到你存了多少 SUI。
+            </p>
+            <p className="text-[11px] text-zinc-500 leading-relaxed mt-2">
+              Pedersen 承诺隐藏的是承诺内的数学值，但由于每个账户有独立的 vault，金额并未真正隐藏。
+              完整的保密转账需要「混合池」设计 — 所有人的资金混在一起，用 Pedersen 承诺追踪份额，
+              消除 vault 与个人的对应关系。那是产品层面的工作。
+            </p>
+            <p className="text-[11px] text-zinc-500 leading-relaxed mt-2">
+              本 Demo 证明的是：<strong className="text-zinc-400">snarkjs 在浏览器中生成 Groth16 证明 → Sui 链上 BN254 配对验证</strong>这条完整管线已打通。
+              未来想在 Sui 上构建隐私应用的开发者，可以直接使用 SuiCryptoLib 的 pedersen 和 range_proof 模块。
+            </p>
+          </div>
+        </div>
+      )}
+
+      <footer className="border-t border-zinc-800/40 py-6 text-center mt-6">
         <p className="text-[11px] text-zinc-700">
           SuiCryptoLib -- pedersen + range_proof -- Groth16 on BN254
         </p>
