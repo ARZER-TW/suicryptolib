@@ -1,516 +1,454 @@
-# 加密价格预测市场 — 实作指南
+# 加密价格预测市场 — 实作指南 v2
 
-本文档是 PREDICTION_MARKET_SPEC v4.2 的**具体实作参考**。按 Phase 顺序编排，每个步骤包含文件路径、输入输出、关键细节。
+本文档是 PREDICTION_MARKET_SPEC v4.2 的自包含实作参考。设计目的是让一个没有项目上下文的 AI 或开发者能够独立完成实作。
+
+---
+
+## 零、项目上下文
+
+### 项目是什么
+
+SuiCryptoLib 是 Sui 链上的密码学原语库。已有 9 个 Move 模块、3 个 ZK 电路、3 个 Demo（密封拍卖、保密账户、匿名群组）。本次任务是新增第 4 个 Demo：加密价格预测市场。
+
+### 代码库根目录
+
+```
+/home/james/projects/suicryptolib/
+```
+
+### 已部署的 Testnet 地址
+
+| 资产 | 值 |
+|------|---|
+| suicryptolib Package (v2) | `0xd8ad089847187cbaa15da503e8892d5e3f0a2acd6cad1aff7be05bf0c127cf02` |
+| UpgradeCap | `0x485a3ab5db303c62d19b35ea2e2c52f95ff4bb1c518bd9981ef4005f55e9aad8` |
+| Sealed Auction Package | `0x0e500f771f6453e3943ae40167329880b9ae495ceba7d713220f41d6af5edeee` |
+| Confidential Account Package | `0x001dc8ff0bd006ebd7fd50d00f1e1772c76c033c2af323cf0a43d76e5df80738` |
+| 部署钱包地址 | `0xae79a6345c691f7b9c7a20f104c62d4e71c8928e03f421284b7d8d265a567edd` |
+| 剩余 Gas | ~0.8 SUI（可能需要领水） |
+| Sui Config Dir | `/tmp/sui_testnet` |
+
+### 现有文件参考
+
+| 需要什么 | 从哪里复制/参考 |
+|---------|----------------|
+| 格式转换 (snarkjs → Sui) | `examples/confidential_account/frontend/src/lib/format-sui.js` |
+| sender_hash 计算 | `examples/confidential_account/frontend/src/lib/sender-hash.js` |
+| 浏览器 ZK proof 生成 | `examples/confidential_account/frontend/src/lib/prover.js` |
+| 操作详情组件 | `examples/confidential_account/frontend/src/components/OperationDetail.jsx` |
+| 隐私切换组件 | `examples/confidential_account/frontend/src/components/PrivacyToggle.jsx` |
+| 链上数据注释组件 | `examples/confidential_account/frontend/src/components/ChainDataView.jsx` |
+| 模块标签组件 | `examples/confidential_account/frontend/src/components/ModuleTag.jsx` |
+| PTB 构建模式 (hash_commitment) | `examples/sealed_auction/frontend/src/use-auction.js` (place_bid) |
+| Vite + snarkjs + circomlibjs 配置 | `examples/confidential_account/frontend/vite.config.js` |
+| Circom 电路模板 (Pedersen + sender) | `circuits/pedersen/pedersen_commitment.circom` |
+| 测试向量生成脚本模板 | `circuits/range_proof/test_prove.mjs` |
+| Generator G 和 H 的具体值 | `circuits/pedersen/pedersen_commitment.circom` 第 25-36 行 |
+| Generator H 推导方法 | `scripts/compute_generator_h.mjs` |
+
+### 当前测试状态
+
+```
+Move (library):  93 tests — ALL PASS
+Move (auction):   4 tests — ALL PASS
+Move (account):   5 tests — ALL PASS
+SDK:             34 tests — ALL PASS
+```
+
+### 过往踩坑记录（极重要）
+
+| 问题 | 原因 | 解决方案 |
+|------|------|---------|
+| `clock::timestamp_ms` 在 testnet 编译失败 | `use sui::clock::Clock` 只导入类型，不导入模块函数 | 改为 `use sui::clock::{Self, Clock}` |
+| circomlibjs 在浏览器中 Buffer 报错 | circomlibjs 依赖 Node.js 的 Buffer/events/util | 安装 `vite-plugin-node-polyfills`，在 vite.config 中配置 |
+| snarkjs 在 Vite 中 import 问题 | snarkjs 是 CommonJS | 在 vite.config 中加 `optimizeDeps.include: ["snarkjs"]` |
+| Demo 2 存款后页面跳转太快看不到详情 | `onSuccess` 在 `setDetail` 后立即触发导航 | 改为先显示详情 + 手动跳转按钮 |
+| 链上 phase 不会自动更新 | Move 合约只在 `reveal_bid`/`settle` 时懒更新 phase | 前端用本地时间计算 effectivePhase |
+| SHA-256 前端/链上不匹配 | 旧版用自写 JS SHA-256 有 padding bug | 改用 `crypto.subtle.digest("SHA-256")` |
+| Balance\<SUI\> 的 JSON 格式 | 以为是 `{ fields: { value: "..." } }` 实际是直接字符串 | `parseInt(typeof f.vault === "string" ? f.vault : f.vault?.fields?.value)` |
+| Sui Table 不可迭代 | Table 只能按 key 查询，不能遍历 | 用 Table + vector\<address\> 双结构 |
+| suicryptolib 升级后 package ID 变化 | upgrade 产生新 package ID | 更新 Move.toml 的 published-at 和前端 config |
 
 ---
 
 ## Phase 1: ZK 电路 — threshold_range
 
-### 1.1 文件结构
+### 1.1 创建文件
 
-```
-circuits/threshold_range/
-├── threshold_range.circom        ← 新电路
-├── test_prove.mjs                ← 测试脚本
-├── threshold_range_js/
-│   └── threshold_range.wasm      ← 编译产物
-├── threshold_range_final.zkey    ← trusted setup 产物
-└── verification_key.json         ← VK（用于 Move 模块）
+```bash
+mkdir -p circuits/threshold_range
 ```
 
-### 1.2 电路设计
+### 1.2 电路源码
 
-```circom
-pragma circom 2.1.5;
+文件：`circuits/threshold_range/threshold_range.circom`
 
-include "../node_modules/circomlib/circuits/babyjub.circom";
-include "../node_modules/circomlib/circuits/escalarmulfix.circom";
-include "../node_modules/circomlib/circuits/bitify.circom";
+完整源码见 SPEC 的 Section IV。关键点：
+- 复用 `circuits/pedersen/pedersen_commitment.circom` 的 Generator G 和 H（同一份常量）
+- 下限验证：`Num2Bits(64)(value - minValue)` — 如果 value < minValue，差值是负数（域元素极大），Num2Bits 会失败
+- 上限验证：`Num2Bits(64)(maxValue - value)` — 同理
+- **不加** `sender_sq <== senderHash * senderHash`（spec v4.2 决定移除）
+- Public inputs 声明：`component main {public [minValue, maxValue, senderHash]} = ThresholdRange();`
 
-template ThresholdRange() {
-    // Private
-    signal input value;
-    signal input blinding;
-
-    // Public
-    signal input minValue;
-    signal input maxValue;
-    signal input senderHash;
-
-    // Outputs
-    signal output commitmentX;
-    signal output commitmentY;
-
-    // 1. 下限: value >= minValue
-    component lowerBound = Num2Bits(64);
-    lowerBound.in <== value - minValue;
-
-    // 2. 上限: value <= maxValue
-    component upperBound = Num2Bits(64);
-    upperBound.in <== maxValue - value;
-
-    // 3. Pedersen 承诺: value*G + blinding*H
-    //    G = BabyJubJub base point (同 pedersen_commitment.circom)
-    //    H = nothing-up-my-sleeve point (同 pedersen_commitment.circom)
-    var G[2] = [
-        5299619240641551281634865583518297030282874472190772894086521144482721001553,
-        16950150798460657717958625567821834550301663161624707787222815936182638968203
-    ];
-    var H[2] = [
-        18267622314187687572088998826809831308727694590966921888299154889300475970589,
-        8059698257908533886155608288179897806584863540535702356995467530609830876645
-    ];
-
-    component valueBits = Num2Bits(253);
-    valueBits.in <== value;
-    component blindingBits = Num2Bits(253);
-    blindingBits.in <== blinding;
-
-    component vG = EscalarMulFix(253, G);
-    for (var i = 0; i < 253; i++) { vG.e[i] <== valueBits.out[i]; }
-
-    component rH = EscalarMulFix(253, H);
-    for (var i = 0; i < 253; i++) { rH.e[i] <== blindingBits.out[i]; }
-
-    component add = BabyAdd();
-    add.x1 <== vG.out[0];
-    add.y1 <== vG.out[1];
-    add.x2 <== rH.out[0];
-    add.y2 <== rH.out[1];
-
-    commitmentX <== add.xout;
-    commitmentY <== add.yout;
-
-    // senderHash: 无需额外约束
-    // Groth16 public input 天然绑定在验证方程中
-    // Move 合约验证 senderHash == Poseidon(ctx.sender())
-}
-
-component main {public [minValue, maxValue, senderHash]} = ThresholdRange();
-```
-
-### 1.3 编译和设置命令
+### 1.3 编译 + Trusted Setup
 
 ```bash
 cd circuits/threshold_range
 
-# 编译
+# 编译（注意 -l 指向 node_modules）
 circom threshold_range.circom --r1cs --wasm --sym --output . -l ../node_modules
+
+# 检查约束数（预期 ~8,013）
+# 输出会显示 "non-linear constraints: XXXX"
 
 # Trusted setup
 snarkjs groth16 setup threshold_range.r1cs ../pot15.ptau threshold_0000.zkey
 snarkjs zkey contribute threshold_0000.zkey threshold_range_final.zkey \
-  --name="SuiCryptoLib ThresholdRange v1" -e="threshold range setup entropy"
+  --name="SuiCryptoLib ThresholdRange v1" -e="threshold range setup entropy 2026"
 snarkjs zkey export verificationkey threshold_range_final.zkey verification_key.json
 ```
 
-### 1.4 测试向量
+### 1.4 测试向量脚本
 
-test_prove.mjs 需要测试以下场景：
+文件：`circuits/threshold_range/test_prove.mjs`
 
-| 场景 | value | min | max | 预期结果 |
-|------|-------|-----|-----|---------|
-| 正常值 | 85000 | 50000 | 150000 | PASS |
-| 下界 | 50000 | 50000 | 150000 | PASS (value == min) |
-| 上界 | 150000 | 50000 | 150000 | PASS (value == max) |
-| 低于下限 | 49999 | 50000 | 150000 | FAIL (Num2Bits 负数) |
-| 高于上限 | 150001 | 50000 | 150000 | FAIL (Num2Bits 负数) |
+**参考模板：** 复制 `circuits/range_proof/test_prove.mjs` 的结构，修改：
+- 电路路径改为 `threshold_range_js/threshold_range.wasm` 和 `threshold_range_final.zkey`
+- 输入改为 `{ value, blinding, minValue, maxValue, sender_hash }`
+- 测试 5 组向量（正常值、下界、上界、低于下限、高于上限）
+- 输出 Sui 格式的 VK hex + proof bytes + public inputs（用于 Move 测试）
 
-test_prove.mjs 还需要输出 Sui 格式的 VK hex（用于 Move 模块）和测试向量的 proof bytes + public inputs（用于 Move 测试）。
+### 1.5 验证标准
 
-### 1.5 注意事项
+- [ ] circom 编译无错误
+- [ ] 约束数 ≈ 8,013
+- [ ] 正常值 proof 本地 verify PASS
+- [ ] value == min PASS
+- [ ] value == max PASS
+- [ ] value == min-1 FAIL（无法生成 witness）
+- [ ] value == max+1 FAIL（无法生成 witness）
+- [ ] 输出了 VK hex 和测试向量的 proof bytes
 
-- Generator G 和 H 必须与现有 pedersen_commitment.circom 完全一致
-- senderHash 不加 `sender_sq <== senderHash * senderHash`（与现有电路不同，spec v4.2 决定移除）
-- Public inputs 顺序（从 Circom 输出）: commitmentX, commitmentY, minValue, maxValue, senderHash — **这个顺序决定了 Move 合约中 public inputs 的拼接顺序，必须实测确认**
+### 1.6 关键验证：public inputs 顺序
+
+运行 test_prove.mjs 后，检查 `publicSignals` 的顺序：
+```javascript
+console.log("Public signals:", publicSignals);
+// 预期顺序: [commitmentX, commitmentY, minValue, maxValue, senderHash]
+// 但可能不同！必须实测确认
+```
+
+**这个顺序决定了 Phase 2 中 Move 合约拼接 public inputs 的字节顺序。** 顺序错误 = 链上验证永远失败，且报错只有 "proof invalid"，没有任何提示。
 
 ---
 
 ## Phase 2: Move 合约
 
-### 2.1 文件结构
+### 2.1 threshold_range.move
 
+文件：`move/sources/threshold_range.move`
+
+**参考模板：** 复制 `move/sources/range_proof.move` 的结构：
+- 修改 VK bytes 为 Phase 1 产生的 VK hex
+- 修改 public inputs 拼接逻辑（加入 minValue 和 maxValue）
+- 函数签名：`verify_threshold_range(commitment, min_value, max_value, sender_hash, proof_bytes) -> bool`
+
+**public inputs 拼接伪代码：**
 ```
-examples/prediction_market/move/
-├── Move.toml
-├── sources/
-│   ├── market.move                ← 主合约
-│   └── market_tests.move          ← 测试
-```
+拼接顺序 = Phase 1.6 实测确认的顺序
 
-Move.toml 依赖 suicryptolib（已部署）和 Pyth。
-
-### 2.2 threshold_range.move
-
-放在 suicryptolib 主库中（需要升级 package）：
-
-```
-move/sources/threshold_range.move
-```
-
-**关键：** public inputs 拼接顺序必须与 Circom 电路输出顺序一致。Phase 1.5 确认顺序后才能写这个模块。
-
-拼接逻辑（伪代码）：
-```
-public_inputs = commitmentX(32B LE) || commitmentY(32B LE)
-             || minValue(32B LE) || maxValue(32B LE)
-             || senderHash(32B LE)
+对于每个 public input:
+- 如果是 commitment 坐标 (vector<u8>): 直接 append（已是 32B LE）
+- 如果是 u64 (min/max): 转为 u256 再转为 32 bytes LE
+  方法: append_u256_le(buf, (value as u256))
+- 如果是 sender_hash (vector<u8>): 直接 append（已是 32B LE）
 ```
 
-其中 minValue 和 maxValue 是 u64 转为 u256 再转为 32 bytes LE。
+**注意：** `append_u256_le` 函数已在 `semaphore.move` 中实现，可直接复用。
 
-### 2.3 prediction_market.move 关键实作细节
+### 2.2 prediction_market.move
 
-**sender_hash 验证：**
-```move
-// address → hi/lo 128-bit → Poseidon
-let addr_bytes = bcs::to_bytes(&tx_context::sender(ctx));
-// 取前 16 bytes 为 hi, 后 16 bytes 为 lo
-// 转为 u256
-let expected = sui::poseidon::poseidon_bn254(vector[hi_u256, lo_u256]);
-// 与传入的 sender_hash 比对
+文件：`examples/prediction_market/move/sources/market.move`
+
+**Move.toml 依赖：**
+```toml
+[dependencies]
+Sui = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/sui-framework", rev = "framework/testnet" }
+suicryptolib = { local = "../../../move" }
 ```
 
-注意：address 在 Move 中是 32 bytes。拆分方式必须与 SDK 的 `addressToSenderHash` 完全一致。现有 SDK 在 `examples/confidential_account/frontend/src/lib/sender-hash.js` 中的实现是：
+**Pyth 依赖（需要实测确认 rev）：**
+```toml
+# 需要查询 Pyth Sui SDK 的最新 Move 依赖方式
+# 参考: https://docs.pyth.network/price-feeds/use-real-data/sui
+# 可能是 git 依赖或已发布的 package
+```
+
+**sender_hash 验证的 Move 实现：**
+
+现有 SDK 实现（`examples/confidential_account/frontend/src/lib/sender-hash.js`）：
 ```javascript
 const addr = BigInt(address);
 const lo = addr & ((1n << 128n) - 1n);
 const hi = addr >> 128n;
+const hash = poseidon.F.toString(poseidon([hi, lo]));
 ```
 
-Move 中需要做等价的拆分。`addr_bytes[0..16]` 是高位还是低位取决于 BCS 序列化的字节序 — **必须实测确认**。
+Move 中等价实现需要：
+1. `tx_context::sender(ctx)` 获取 address（32 bytes）
+2. BCS 序列化为 bytes
+3. 拆分为 hi 和 lo（**字节序必须与 JS 一致**）
+4. 转为 u256
+5. `sui::poseidon::poseidon_bn254(vector[hi, lo])`
 
-**settle 中的价格截断：**
+**字节序确认方法：** 写一个 #[test] 打印 BCS 序列化的 address bytes，与 JS 的 BigInt(address) 的字节比对。Sui address 的 hex 表示是大端序，BCS 序列化也是大端序。JS 的 `BigInt("0xabcd...")` 是大端数值。所以 `addr >> 128n` 取的是高位 = bytes[0..16]，`addr & mask` 取的是低位 = bytes[16..32]。
+
+**settle 中 abs_diff 实现：**
 ```move
-// Pyth 返回 I64 类型
-let raw_price = price::get_price(&price_struct);      // I64
-let expo = price::get_expo(&price_struct);              // I64 (负数如 -8)
-
-// BTC/USD: price=8499973000, expo=-8
-// actual_usd = 8499973000 / 10^8 = 84999 (向下截断)
-// 需要用 pyth::i64 模块提取 magnitude 和符号
+fun abs_diff(a: u64, b: u64): u64 {
+    if (a >= b) { a - b } else { b - a }
+}
 ```
 
-**settle 资金分配（两次遍历）：**
+### 2.3 测试
+
+**test_only settle 函数：**
 ```move
-// 第一次遍历: 找赢家
-let i = 0;
-let min_diff = 0xFFFFFFFFFFFFFFFF; // u64::MAX
-let winner = option::none<address>();
-while (i < vector::length(&market.predictor_addresses)) {
-    let addr = *vector::borrow(&market.predictor_addresses, i);
-    let pred = table::borrow(&market.predictions, addr);
-    if (pred.revealed) {
-        let diff = abs_diff(pred.revealed_value, market.actual_price);
-        if (diff < min_diff) {  // 严格小于 → 先提交者优先
-            min_diff = diff;
-            winner = option::some(addr);
-        };
-    };
-    i = i + 1;
-};
-
-// 第二次遍历: 退还非赢家揭示者的押注
-let i = 0;
-while (i < vector::length(&market.predictor_addresses)) {
-    let addr = *vector::borrow(&market.predictor_addresses, i);
-    let pred = table::borrow(&market.predictions, addr);
-    if (pred.revealed && option::some(addr) != winner) {
-        // 退还 pred.stake_amount 给 addr
-        let refund = coin::from_balance(
-            balance::split(&mut market.prize_pool, pred.stake_amount), ctx
-        );
-        transfer::public_transfer(refund, addr);
-    };
-    i = i + 1;
-};
-
-// 赢家获得剩余 prize_pool（自己的押注 + 所有未揭示者的押注）
-let winner_addr = option::extract(&mut winner);
-let prize = coin::from_balance(
-    balance::withdraw_all(&mut market.prize_pool), ctx
-);
-transfer::public_transfer(prize, winner_addr);
+#[test_only]
+public fun settle_for_testing(
+    market: &mut Market,
+    actual_price: u64,
+    clock: &Clock,
+    ctx: &mut TxContext,
+)
 ```
 
-### 2.4 20 个测试用例
+逻辑与真实 settle 相同，但不读 Pyth，直接接受 actual_price 参数。
 
-每个测试需要的测试向量来自 Phase 1。对于涉及 ZK proof 的测试（#4, #5, #9），需要从 test_prove.mjs 获取具体的 proof bytes 和 public inputs。
+**需要从 Phase 1 获取的测试向量：**
+- 一组有效的 proof bytes + commitment_x/y + min + max + sender_hash（用于 test_submit_prediction）
+- 一组无效的 proof bytes（用于 test_submit_invalid_proof_fails）
 
-对于不涉及 ZK 的测试（如 create_market 参数验证），直接在 Move 中构造。
+### 2.4 部署
 
-settle 相关测试使用 `#[test_only]` 的 settle_for_testing 函数 mock Pyth 价格。
-
-### 2.5 部署
-
-suicryptolib 需要升级（添加 threshold_range 模块）：
+**升级 suicryptolib（添加 threshold_range 模块）：**
 ```bash
 cd move
-sui client upgrade --gas-budget 200000000 --upgrade-capability 0x485a3ab5...
+SUI_CONFIG_DIR=/tmp/sui_testnet sui client upgrade \
+  --gas-budget 200000000 \
+  --upgrade-capability 0x485a3ab5db303c62d19b35ea2e2c52f95ff4bb1c518bd9981ef4005f55e9aad8 \
+  --skip-dependency-verification
 ```
 
-prediction_market 作为独立包部署：
+升级后会得到新的 package ID。更新 `move/Move.toml` 的 `published-at`。
+
+**部署 prediction_market：**
 ```bash
 cd examples/prediction_market/move
-sui client publish --gas-budget 200000000
+SUI_CONFIG_DIR=/tmp/sui_testnet sui client publish \
+  --gas-budget 200000000 \
+  --skip-dependency-verification
 ```
+
+**如果 gas 不够：** 去 https://faucet.sui.io/?address=0xae79a6345c691f7b9c7a20f104c62d4e71c8928e03f421284b7d8d265a567edd 领水。注意 faucet 有 rate limit，多次请求需要等待。
+
+### 2.5 验证标准
+
+- [ ] threshold_range.move 测试通过（有效 proof、无效 proof、边界值）
+- [ ] prediction_market.move 全部 20 个测试通过
+- [ ] 现有 93 个 library 测试无 regression
+- [ ] 两个包都成功部署到 testnet
 
 ---
 
 ## Phase 3: Pyth 集成
 
-### 3.1 依赖安装
+### 3.1 首先实测验证（不写合约代码，先确认 API）
 
+**安装：**
 ```bash
 npm install @pythnetwork/pyth-sui-js @pythnetwork/hermes-client
 ```
 
-### 3.2 Pyth Testnet 配置
+**验证脚本：** `scripts/test_pyth.mjs`
 
+需要确认的 6 件事（每件事写一小段代码验证）：
+
+1. **Hermes API 数据格式**
 ```javascript
-// Pyth Sui Testnet State ID (需确认最新值)
-// 查询: https://docs.pyth.network/price-feeds/contract-addresses/sui
-const PYTH_STATE_ID = "0x...";  // testnet
-const WORMHOLE_STATE_ID = "0x...";  // testnet
-
-// BTC/USD Price Feed ID (所有链通用)
-const BTC_USD_FEED_ID = "0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43";
+const hermes = new HermesClient("https://hermes.pyth.network");
+const updates = await hermes.getLatestPriceUpdates(["0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43"]);
+console.log("binary data format:", typeof updates.binary.data, updates.binary.data.length);
+console.log("parsed price:", updates.parsed[0].price);
 ```
 
-### 3.3 验证脚本 (scripts/test_pyth.mjs)
-
+2. **SuiPythClient 构造**
 ```javascript
-import { SuiPythClient } from "@pythnetwork/pyth-sui-js";
-import { HermesClient } from "@pythnetwork/hermes-client";
+// 需要确认 testnet 的 PYTH_STATE_ID 和 WORMHOLE_STATE_ID
+// 查询: https://docs.pyth.network/price-feeds/contract-addresses/sui
+```
 
-// 1. 从 Hermes 获取价格
-const hermes = new HermesClient("https://hermes.pyth.network");
-const priceUpdates = await hermes.getLatestPriceUpdates([BTC_USD_FEED_ID]);
-
-// 2. 构建 PTB
+3. **updatePriceFeeds PTB 构建**
+```javascript
 const pythClient = new SuiPythClient(suiClient, PYTH_STATE_ID, WORMHOLE_STATE_ID);
 const tx = new Transaction();
-await pythClient.updatePriceFeeds(tx, priceUpdates.binary.data, [BTC_USD_FEED_ID]);
-
-// 3. 在同一 PTB 中调用 settle
-tx.moveCall({
-  target: `${MARKET_PKG}::market::settle`,
-  arguments: [tx.object(marketId), tx.object(priceInfoObjectId), tx.object("0x6")],
-});
+const priceInfoObjectIds = await pythClient.updatePriceFeeds(tx, updates.binary.data, [BTC_USD_FEED_ID]);
+console.log("priceInfoObjectIds:", priceInfoObjectIds);
 ```
 
-### 3.4 Move 合约中的 Pyth 读取
+4. **Pyth Move API 路径**
+在 Move 合约中测试 `pyth::get_price` 的导入和调用。
 
+5. **I64 类型处理**
 ```move
-use pyth::pyth;
-use pyth::price;
-use pyth::price_info::PriceInfoObject;
-
-// settle 函数内:
-let price_struct = pyth::get_price(price_info_object, clock);
-let price_timestamp = price::get_timestamp(&price_struct);
 let price_i64 = price::get_price(&price_struct);
-let expo_i64 = price::get_expo(&price_struct);
+// 如何从 I64 提取 u64 值？查 pyth::i64 模块
 ```
 
-**I64 → u64 转换需要实测。** Pyth 的 I64 是自定义类型，查看 `pyth::i64` 模块确认 API。
+6. **BTC/USD 的 expo 值**
+预期 expo = -8，但需确认。
 
-### 3.5 实测检查清单
+### 3.2 合约集成
 
-- [ ] Hermes API 返回数据格式
-- [ ] SuiPythClient.updatePriceFeeds 的参数格式
-- [ ] PriceInfoObject 的 Sui object ID 如何获取
-- [ ] price::get_timestamp 返回值是 seconds 还是 ms
-- [ ] price::get_price 返回值的 magnitude 和符号处理
-- [ ] price::get_expo 的典型值（BTC/USD 预期 -8）
-- [ ] Pyth testnet 的 package ID
+确认所有 API 后，修改 `prediction_market.move`：
+- 添加真实 `settle` 函数（读 Pyth）
+- 保留 `settle_for_testing`（用于 Move 测试）
+
+### 3.3 验证标准
+
+- [ ] 从 Hermes 获取 BTC/USD 价格成功
+- [ ] SuiPythClient.updatePriceFeeds PTB 构建成功
+- [ ] 链上读取 Pyth 价格成功
+- [ ] I64 → u64 转换正确
+- [ ] 价格截断（向下到整数美元）正确
 
 ---
 
 ## Phase 4: SDK 统一 + Walrus
 
-### 4.1 SDK 文件结构
+### 4.1 去重
 
-```
-sdk/src/
-├── index.js                  ← 统一入口
-├── format-sui.js             ← 从三个 Demo 合并（去重）
-├── prover.js                 ← 通用 snarkjs 封装
-├── sender-hash.js            ← Poseidon(hi, lo) — 从 Demo 2 提取
-├── hash-commitment.js        ← 已有
-├── merkle.js                 ← 已有
-├── pedersen.js               ← 封装 pedersen proof 生成
-├── range-proof.js            ← 封装 range proof 生成
-├── threshold-range.js        ← 新增
-└── semaphore.js              ← 封装 semaphore proof 生成
-```
+当前重复的文件和要合并到的位置：
 
-### 4.2 去重清单
+| 源文件 | 合并到 |
+|--------|--------|
+| `examples/confidential_account/frontend/src/lib/format-sui.js` | `sdk/src/format-sui.js` |
+| `examples/confidential_account/frontend/src/lib/sender-hash.js` | `sdk/src/sender-hash.js` |
+| `examples/confidential_account/frontend/src/lib/prover.js` | `sdk/src/prover.js` |
+| `examples/semaphore/frontend/src/lib/prover.js`（格式转换部分） | 合并到上面 |
 
-当前三份副本：
-- `examples/sealed_auction/frontend/src/lib/format-sui.js` — 没有 convertVK
-- `examples/confidential_account/frontend/src/lib/format-sui.js` — 有 convertPublicInputs
-- `examples/semaphore/frontend/src/lib/prover.js` — 包含格式转换
+**注意：** 去重后不要删除 Demo 中的原文件（它们仍在使用）。先创建 SDK 的新文件，验证 SDK 可用后，再决定是否将 Demo 改为引用 SDK。
 
-合并为 `sdk/src/format-sui.js`：包含 bigintToBytes32LE, serializeG1Compressed, serializeG2Compressed, convertProof, convertPublicInputs, convertVK。
+### 4.2 新增 threshold-range.js
 
-### 4.3 threshold-range.js API
+文件：`sdk/src/threshold-range.js`
 
-```javascript
-export async function generateThresholdRangeProof({
-  value,          // 预测值 (decimal string)
-  minValue,       // 范围下限 (decimal string)
-  maxValue,       // 范围上限 (decimal string)
-  blinding,       // 随机 blinding factor (decimal string)
-  senderHash,     // Poseidon(addr_hi, addr_lo) (decimal string)
-  wasmUrl,        // .wasm 文件 URL (Walrus)
-  zkeyUrl,        // .zkey 文件 URL (Walrus)
-  onProgress,     // 进度回调
-}) {
-  // 1. snarkjs.groth16.fullProve
-  // 2. convertProof → 128 bytes
-  // 3. 提取 public signals: commitmentX, commitmentY, minValue, maxValue, senderHash
-  // 4. 返回 { proofBytes, commitmentX, commitmentY, senderHashBytes }
-}
-```
+参考 `examples/confidential_account/frontend/src/lib/prover.js` 的 `generateRangeProof` 函数结构。修改：
+- 电路输入加 `minValue` 和 `maxValue`
+- 路径改为 Walrus URL（参数传入）
 
-### 4.4 Walrus 上传
+### 4.3 Walrus 上传
 
 ```bash
-# 使用 Walrus CLI 或 HTTP API 上传
-walrus store threshold_range.wasm --epochs 100
-# 输出 blob ID
+# 安装 Walrus CLI (如果没有)
+# 参考: https://docs.walrus.site/usage/setup.html
 
-walrus store threshold_range_final.zkey --epochs 100
-# 输出 blob ID
+# 上传
+walrus store circuits/threshold_range/threshold_range_js/threshold_range.wasm --epochs 100
+walrus store circuits/threshold_range/threshold_range_final.zkey --epochs 100
 ```
 
-记录 blob ID，配置到前端 config 中。
+记下返回的 blob IDs。
 
-### 4.5 验证
-
-上传后测试：
-```javascript
-const wasmUrl = `https://aggregator.walrus-testnet.walrus.space/v1/${WASM_BLOB_ID}`;
-const zkeyUrl = `https://aggregator.walrus-testnet.walrus.space/v1/${ZKEY_BLOB_ID}`;
-const result = await generateThresholdRangeProof({ ..., wasmUrl, zkeyUrl });
-// 验证 result.proofBytes 能通过链上验证
+**Walrus aggregator URL 格式（已确认）：**
 ```
+Testnet: https://aggregator.walrus-testnet.walrus.space/v1/<blobId>
+```
+
+### 4.4 验证标准
+
+- [ ] `sdk/src/format-sui.js` 包含所有格式转换函数
+- [ ] `sdk/src/threshold-range.js` 能从 Walrus URL 加载电路并生成 proof
+- [ ] 生成的 proof 能通过 testnet 上的 threshold_range.move 验证
+- [ ] 现有 SDK 测试（34 个）无 regression
 
 ---
 
 ## Phase 5: 前端
 
-### 5.1 文件结构
+### 5.1 脚手架
 
-```
-examples/prediction_market/frontend/
-├── public/
-│   └── (无本地电路文件 — 全部从 Walrus 加载)
-├── src/
-│   ├── App.jsx
-│   ├── main.jsx
-│   ├── index.css
-│   ├── config.js                    ← package IDs, Pyth config, Walrus URLs
-│   ├── lib/
-│   │   ├── prediction.js           ← hash commitment + ZK proof 生成
-│   │   └── pyth.js                 ← Pyth 价格获取 + PTB 构建
-│   ├── hooks/
-│   │   ├── use-market.js           ← create/submit/reveal/settle hooks
-│   │   └── use-market-state.js     ← 读取市场状态
-│   └── components/
-│       ├── CreateMarket.jsx
-│       ├── SubmitPrediction.jsx
-│       ├── RevealPrediction.jsx
-│       ├── SettleMarket.jsx
-│       ├── MarketStatus.jsx        ← 阶段 + 倒计时
-│       ├── OperationDetail.jsx     ← 复用
-│       ├── PrivacyToggle.jsx       ← 复用
-│       ├── ChainDataView.jsx       ← 复用 (AnnotatedChainData + SuiscanLink)
-│       └── ModuleTag.jsx           ← 复用
-├── vite.config.js
-├── package.json
-└── index.html
+```bash
+mkdir -p examples/prediction_market/frontend
+cd examples/prediction_market/frontend
+
+npm create vite@latest . -- --template react
+npm install
+npm install @mysten/dapp-kit @mysten/sui @tanstack/react-query \
+  tailwindcss @tailwindcss/vite snarkjs circomlibjs \
+  vite-plugin-node-polyfills \
+  @pythnetwork/pyth-sui-js @pythnetwork/hermes-client \
+  --legacy-peer-deps
 ```
 
-### 5.2 config.js
-
+**vite.config.js（从 Demo 2 复制并修改）：**
 ```javascript
-export const LIB_PACKAGE_ID = "0x...";  // 升级后的 suicryptolib
-export const MARKET_PACKAGE_ID = "0x...";  // prediction_market
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+import tailwindcss from "@tailwindcss/vite";
+import { nodePolyfills } from "vite-plugin-node-polyfills";
 
-// Pyth
-export const PYTH_STATE_ID = "0x...";
-export const WORMHOLE_STATE_ID = "0x...";
-export const BTC_USD_FEED_ID = "0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43";
-
-// Walrus
-export const WALRUS_AGGREGATOR = "https://aggregator.walrus-testnet.walrus.space/v1/";
-export const THRESHOLD_WASM_BLOB_ID = "...";  // Phase 4 上传后填入
-export const THRESHOLD_ZKEY_BLOB_ID = "...";
-
-// 市场默认值
-export const DEFAULT_MIN_STAKE_MIST = 1_000_000_000;  // 1 SUI
+export default defineConfig({
+  plugins: [
+    react(),
+    tailwindcss(),
+    nodePolyfills({
+      include: ["buffer", "events", "util", "stream", "crypto"],
+      globals: { Buffer: true },
+    }),
+  ],
+  optimizeDeps: {
+    include: ["snarkjs", "circomlibjs"],
+  },
+});
 ```
 
-### 5.3 prediction.js（核心逻辑）
+### 5.2 关键组件
 
-```javascript
-import { computeCommitment, generateSalt } from '@suicryptolib/sdk/hash-commitment';
-import { generateThresholdRangeProof, generateBlinding } from '@suicryptolib/sdk/threshold-range';
-import { addressToSenderHash } from '@suicryptolib/sdk/sender-hash';
+**CreateMarket：** 表单输入 → PTB `market::create_market()` → 签名
 
-// 标准化预测值
-export function normalizeValue(input) {
-  const num = parseInt(input, 10);
-  if (isNaN(num) || num < 0) throw new Error('Invalid prediction');
-  return num.toString();  // 去前导零
-}
+**SubmitPrediction：** 核心流程（参考 SPEC Section VII SDK 函数）：
+1. `normalizeValue(input)` — 去前导零
+2. `generateSalt(32)` + `computeCommitment(value, salt, 0)` — hash commitment
+3. `generateBlinding()` + `addressToSenderHash(address)` — ZK 准备
+4. `generateThresholdRangeProof({...})` — 浏览器生成 ZK proof（3-5 秒）
+5. PTB: `hash_commitment::from_hash(hash, 0)` → `market::submit_prediction(market, commitment, zk_x, zk_y, sender_hash, proof, coin, clock)`
+6. 保存 `{ value, saltHex }` 到 localStorage
 
-export async function preparePrediction({ value, minPrediction, maxPrediction, walletAddress, onProgress }) {
-  const valueStr = normalizeValue(value);
+**PTB 模式参考：** `examples/sealed_auction/frontend/src/use-auction.js` 的 `usePlaceBid` 函数展示了如何在 PTB 中链式调用 `from_hash()` 和业务函数。
 
-  // 1. Hash commitment (用于揭示)
-  onProgress?.("hashing");
-  const salt = generateSalt(32);
-  const hashCommitment = computeCommitment(valueStr, salt, 0);  // SHA256
+**RevealPrediction：** 从 localStorage 读 value + salt → PTB `market::reveal_prediction(value_bytes, salt_bytes)`
 
-  // 2. ZK 范围证明
-  onProgress?.("proving");
-  const blinding = generateBlinding();
-  const senderHash = await addressToSenderHash(walletAddress);
-  const rangeResult = await generateThresholdRangeProof({
-    value: valueStr,
-    minValue: minPrediction.toString(),
-    maxValue: maxPrediction.toString(),
-    blinding,
-    senderHash,
-    wasmUrl: `${WALRUS_AGGREGATOR}${THRESHOLD_WASM_BLOB_ID}`,
-    zkeyUrl: `${WALRUS_AGGREGATOR}${THRESHOLD_ZKEY_BLOB_ID}`,
-  });
+**SettleMarket：** 调用 `pythClient.updatePriceFeeds(tx, ...)` → `market::settle(market, price_info, clock)`
 
-  onProgress?.("done");
+### 5.3 UI 复用
 
-  // 3. 保存秘密到 localStorage
-  const secret = { value: valueStr, saltHex: bytesToHex(salt) };
+从 `examples/confidential_account/frontend/src/components/` 复制以下文件：
+- `OperationDetail.jsx`
+- `PrivacyToggle.jsx`
+- `ChainDataView.jsx`（含 AnnotatedChainData + SuiscanLink）
+- `ModuleTag.jsx`
 
-  return {
-    hashCommitment,
-    rangeResult,
-    senderHash,
-    secret,
-  };
-}
-```
+### 5.4 验证标准
 
-### 5.4 数值序列化标准
-
-前端必须在以下位置执行 normalizeValue：
-- SubmitPrediction 组件的输入框 onChange
-- preparePrediction 函数的入口
-- RevealPrediction 从 localStorage 读取后
-
-统一规则：纯数字、无前导零、零值为 "0"。
+- [ ] build 通过（`npx vite build`）
+- [ ] 创建市场 → 链上成功
+- [ ] 提交预测 → ZK proof 浏览器生成 → 链上验证通过
+- [ ] 揭示 → 链上 hash 验证通过
+- [ ] Pyth 结算 → 链上读价格 → 赢家确定
+- [ ] 操作详情面板正确显示隐私边界
+- [ ] 观察者视角显示注释链上数据 + Suiscan 链接
+- [ ] 所有文字简体中文
 
 ---
 
@@ -518,19 +456,26 @@ export async function preparePrediction({ value, minPrediction, maxPrediction, w
 
 ### 6.1 更新清单
 
-| 文件 | 更新内容 |
-|------|---------|
-| README.md | 加入预测市场 Demo 说明 + 新电路 + Pyth/Walrus 整合 |
-| docs/PROJECT_ANALYSIS.md | 加入第四个 Demo + threshold_range 模块 + Pyth 整合 |
-| docs/SuiCryptoLib_Pitch.pptx | 加入预测市场页 |
-| docs/NEXT_STEPS.md | 标记已完成项 |
+| 文件 | 操作 |
+|------|------|
+| `README.md` | 加入预测市场 Demo 说明 |
+| `docs/PROJECT_ANALYSIS.md` | 加入第四个 Demo + threshold_range + Pyth 整合 |
+| `docs/NEXT_STEPS.md` | 标记 threshold_range 和 prediction_market 为已完成 |
 
 ### 6.2 代码审查重点
 
-- [ ] threshold_range 电路的 min/max 边界是否正确（value == min 和 value == max 都应通过）
-- [ ] public inputs 拼接顺序是否与 Circom 输出一致
-- [ ] sender_hash 的 hi/lo 拆分在电路、合约、SDK 三方是否一致
-- [ ] Pyth I64 类型处理是否正确
-- [ ] 价格截断是否为向下截断
-- [ ] Walrus 加载是否能在首次使用时正常工作（缓存行为）
-- [ ] 所有 Demo 前端是否仍然正常（无 regression）
+- [ ] threshold_range 电路边界（value == min, value == max 都通过）
+- [ ] public inputs 拼接顺序 = Circom 输出顺序（Phase 1.6 确认的）
+- [ ] sender_hash hi/lo 拆分：电路 input、Move Poseidon、SDK addressToSenderHash 三方一致
+- [ ] Pyth I64 → u64 转换正确
+- [ ] 价格截断为向下截断
+- [ ] `prediction_market.move` 的 settle 用 Table + vector 双结构迭代
+- [ ] emergency_refund 也用 predictor_addresses 迭代
+- [ ] 现有 3 个 Demo 前端无 regression
+- [ ] 现有 93 个 library Move 测试无 regression
+
+### 6.3 部署后验证
+
+- [ ] E2E 完整流程：创建 → 预测(2人) → 揭示 → Pyth 结算 → 赢家领奖
+- [ ] Walrus 加载：从 Walrus URL 加载 zkey 后 proof 正常生成
+- [ ] 边界测试：超时 settle → emergency_refund 退款
