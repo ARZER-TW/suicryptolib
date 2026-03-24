@@ -1,4 +1,4 @@
-# SuiCryptoLib — 加密价格预测市场 项目规格书 v3
+# SuiCryptoLib — 加密价格预测市场 项目规格书 v4
 
 ## 变更记录
 
@@ -7,6 +7,7 @@
 | v1 | 初始规格 |
 | v2 | 移除 V2 comparison proof；Oracle 改用 Pyth；V1 揭示改用 hash_commitment；电路加上限；修复 sender_hash；Table 替代 vector |
 | v3 | 修复 Table 不可迭代问题（加 predictor_addresses vector）；Pyth 时间戳窗口验证；create_market 参数验证；明确价格截断规则；记录已知设计取舍；emergency_refund 改为可配置超时；明确资金分配规则；ASCII 序列化标准化 |
+| v4 | emergency_refund 补充迭代逻辑；移除电路 sender_sq 死代码并说明安全机制；记录价格窗口到 emergency 之间的软锁行为；补充 EInvalidValueFormat 错误码；时间戳单位显式标注 ms/s；prize_pool 分配简化为「剩余池」语义；O(n) gas 限制记录；assert!(false) 改 abort |
 
 ---
 
@@ -89,6 +90,18 @@ Hash commitment 用于揭示验证（简单、已有模块），threshold_range 
 
 当市场进入超时退款状态时，未揭示者也能拿回押注。这意味着如果用户预期市场可能无法正常结算（如 Pyth feed 故障），有动机故意不揭示。这是可接受的设计取舍：超时退款的首要目的是防止资金永久锁定。
 
+### 3.5 已知行为：价格窗口过期到 emergency 之间的软锁
+
+若 Pyth 价格窗口已过期（settle_after + window 之后），但 emergency_timeout 尚未到达：
+- settle 调用 → EPriceTooStale（失败）
+- emergency_refund 调用 → EEmergencyTooEarly（失败）
+
+此时市场暂时无法操作，资金被锁定。用户需等待 emergency_timeout 到期后调用 emergency_refund。前端应在此状态显示明确提示和倒计时。这不是 bug — 资金最终可取回。
+
+### 3.6 已知限制：settle 和 emergency_refund 的 O(n) gas
+
+两个函数都遍历 predictor_addresses（vector），gas 成本随预测者数量线性增长。hackathon 场景下（<50 预测者）不是问题。生产环境需考虑分批结算或链下排序 + 链上验证。
+
 ---
 
 ## 四、ZK 电路规格：Threshold Range Proof
@@ -134,10 +147,12 @@ component rH = EscalarMulFix(253, H);
 component add = BabyAdd();
 // ... commitment = vG + rH
 
-// 4. sender 信号绑定（<== 生成真实约束，不会被优化掉）
-signal sender_sq;
-sender_sq <== sender_hash * sender_hash;
+// 4. sender_hash 作为 public input 天然绑定在 Groth16 验证方程中
+//    无需电路内额外约束（sender_sq 是死代码，Circom --O2 会优化掉）
+//    真正的防重放安全来自 Move 合约: assert!(sender_hash == Poseidon(ctx.sender()))
 ```
+
+**注意：** 相比现有电路（pedersen, range_proof, semaphore）中的 `sender_sq <== sender_hash * sender_hash`，新电路不再包含此行。现有电路保持不变（向后兼容），但新电路采用更清晰的设计。
 
 ### 约束估算
 
@@ -185,6 +200,7 @@ module prediction_market::market {
     const EFeedIdMismatch: u64 = 16;
     const ENoRevealedPredictions: u64 = 17;
     const EEmergencyTooEarly: u64 = 18;
+    const EInvalidValueFormat: u64 = 19;
 
     /// 预测市场实例
     public struct Market has key {
@@ -283,7 +299,13 @@ public fun submit_prediction(
 **内部逻辑（按顺序）：**
 1. `assert!(clock::timestamp_ms(clock) <= market.prediction_deadline)` — 时间检查
 2. `assert!(!table::contains(&market.predictions, sender))` — O(1) 防重复
-3. 计算 `expected_sender_hash = poseidon::poseidon_bn254(sender_address_as_u256)`
+3. 计算 sender_hash 验证：
+   ```
+   // address (32 bytes) → 拆为 hi (高 128 bit) 和 lo (低 128 bit)
+   // 避免直接转 u256 可能超出 BN254 域范围 (field prime ≈ 2^254.9)
+   // 与 SDK 的 addressToSenderHash 保持一致: Poseidon(hi, lo)
+   let expected = poseidon::poseidon_bn254(vector[addr_hi_u256, addr_lo_u256]);
+   ```
 4. `assert!(sender_hash == expected_sender_hash)` — 防重放
 5. 构建 PedersenCommitment，调用 `threshold_range::verify(commitment, min_prediction, max_prediction, sender_hash, range_proof_bytes)` — ZK 验证
 6. `assert!(coin::value(&stake) >= market.min_stake)` — 押注检查
@@ -308,7 +330,7 @@ public fun reveal_prediction(
 2. 从 Table 读取 sender 的 Prediction
 3. `assert!(!prediction.revealed)` — 未揭示过
 4. `hash_commitment::verify_opening(&prediction.hash_commitment, value, salt)` — 哈希验证
-5. `parse_u64(value)` → revealed_value
+5. `parse_u64(value)` → revealed_value（解析失败时 `abort EInvalidValueFormat`，不 panic）
 6. `assert!(revealed_value >= min_prediction && revealed_value <= max_prediction)` — 二次范围检查
 7. 标记 revealed = true, revealed_value = parsed
 
@@ -324,17 +346,19 @@ public fun settle(
 ```
 
 **内部逻辑：**
-1. `assert!(timestamp >= market.settle_after)` — 可以结算了
+1. `assert!(clock::timestamp_ms(clock) >= market.settle_after)` — 可以结算了（ms）
 2. `assert!(!market.settled)` — 未结算过
 3. 从 Pyth PriceInfoObject 读取价格和时间戳
 4. 验证 feed ID 匹配 `market.pyth_price_feed_id`
-5. **验证价格时间戳在窗口内：**
+5. **验证价格时间戳在窗口内（注意单位转换 ms → s）：**
    ```
-   price_ts >= settle_after_secs
-   price_ts <= settle_after_secs + settle_price_window_secs
+   let settle_after_secs = market.settle_after / 1000;   // ms → s，向下截断
+   let price_ts = pyth::get_timestamp(&price);            // 已是 seconds
+   assert!(price_ts >= settle_after_secs, EPriceTooEarly);
+   assert!(price_ts <= settle_after_secs + market.settle_price_window_secs, EPriceTooStale);
    ```
 6. 价格转换为整数美元（**向下截断**，如 84999.73 → 84999）
-7. **迭代 predictor_addresses 找赢家：**
+7. **第一次遍历 predictor_addresses 找赢家：**
    ```
    遍历 predictor_addresses (vector)
    对每个地址，从 predictions (Table) 读取 Prediction
@@ -343,10 +367,13 @@ public fun settle(
      如果 abs_diff < current_min_diff:    // 严格小于 → 先提交者自动优先
        更新赢家
    ```
-8. 如果有赢家：
-   - 退还所有已揭示非赢家的押注
-   - 赢家获得自己的押注 + 所有未揭示者被没收的押注
-9. 如果没有任何揭示者：`assert!(false, ENoRevealedPredictions)`
+8. 如果没有任何揭示者：`abort ENoRevealedPredictions`
+9. **第二次遍历 predictor_addresses 分配资金：**
+   ```
+   对每个已揭示的非赢家：从 prize_pool 退还其 stake_amount
+   遍历完成后：prize_pool 的剩余余额全部转给赢家
+   （剩余 = 赢家自己的押注 + 所有未揭示者被没收的押注）
+   ```
 10. 标记 settled, 记录 winner + actual_price
 
 #### emergency_refund
@@ -362,8 +389,10 @@ public fun emergency_refund(
 **内部逻辑：**
 1. `assert!(timestamp > market.settle_after + market.emergency_timeout)` — 超时
 2. `assert!(!market.settled)` — 未正常结算
-3. 退还**所有人**的押注（包括未揭示者）
+3. 遍历 `predictor_addresses`（vector），对每个地址从 `predictions`（Table）读取 `stake_amount`，退还对应押注
 4. 标记 settled = true, winner = None
+
+注意：与 settle 相同，必须通过 predictor_addresses vector 迭代，Table 不支持遍历。
 
 ---
 
@@ -576,6 +605,7 @@ actual_price: 84999 (结算后)
 | 16 | test_settle_price_out_of_window_fails | 价格时间戳超出窗口被拒绝 |
 | 17 | test_emergency_refund | 超时后全额退款 |
 | 18 | test_emergency_too_early_fails | 未超时不能退款 |
+| 19 | test_reveal_invalid_format_fails | 非数字 value bytes 被拒绝 (EInvalidValueFormat) |
 
 注：test_settle 相关测试使用 #[test_only] 的 settle_for_testing 函数（mock Pyth 价格）。
 
@@ -598,7 +628,7 @@ actual_price: 84999 (结算后)
 - [ ] settle_for_testing 测试辅助函数
 - [ ] zkey 文件存 Walrus
 - [ ] 前端（创建/预测/揭示/结算 + 操作详情 + 观察者视角）
-- [ ] Move 测试 18 个 + E2E 测试 3 个
+- [ ] Move 测试 19 个 + E2E 测试 3 个
 - [ ] 更新 README + PROJECT_ANALYSIS.md
 - [ ] 更新 PPT
 
