@@ -1,4 +1,4 @@
-# SuiCryptoLib — 加密价格预测市场 项目规格书 v4
+# SuiCryptoLib — 加密价格预测市场 项目规格书 v4.1
 
 ## 变更记录
 
@@ -118,7 +118,9 @@ Private inputs:
 Public inputs:
   - min_value: 预测范围下限
   - max_value: 预测范围上限
-  - sender_hash: Poseidon(sender_address)
+  - sender_hash: Poseidon([addr_hi, addr_lo])
+              addr_hi = address 高 128 bit (u128), addr_lo = address 低 128 bit (u128)
+              与 Move 合约和 SDK 的 addressToSenderHash 保持一致
 
 Public outputs:
   - commitment_x, commitment_y: Pedersen 承诺坐标
@@ -160,8 +162,8 @@ component add = BabyAdd();
 |------|--------|
 | Num2Bits(64) x 2 | ~128 |
 | EscalarMulFix(253) x 2 + BabyAdd | ~7,885 |
-| sender_hash 约束 | 1 |
-| **总计** | **~8,014** |
+| sender_hash 约束 | 0（public input 天然绑定，无需电路约束） |
+| **总计** | **~8,013** |
 
 ---
 
@@ -279,6 +281,8 @@ assert!(vector::length(&pyth_price_feed_id) == 32)
 assert!(emergency_timeout >= 86400000)         // 至少 1 天
 assert!(settle_price_window_secs > 0 && settle_price_window_secs <= 86400)  // 1秒-1天
 ```
+
+**关于截止时间是否需在未来：** `create_market` 不传入 `&Clock`，不强制 `prediction_deadline > now`。如果创建了一个已过期的市场，任何 `submit_prediction` 都会因 `EWrongPhase` 失败。这是可接受的行为 — 市场创建者的责任，不需要合约层面保护。
 
 #### submit_prediction
 
@@ -606,6 +610,7 @@ actual_price: 84999 (结算后)
 | 17 | test_emergency_refund | 超时后全额退款 |
 | 18 | test_emergency_too_early_fails | 未超时不能退款 |
 | 19 | test_reveal_invalid_format_fails | 非数字 value bytes 被拒绝 (EInvalidValueFormat) |
+| 20 | test_settle_no_reveals_fails | 全部提交但无人揭示 → abort ENoRevealedPredictions |
 
 注：test_settle 相关测试使用 #[test_only] 的 settle_for_testing 函数（mock Pyth 价格）。
 
@@ -628,7 +633,7 @@ actual_price: 84999 (结算后)
 - [ ] settle_for_testing 测试辅助函数
 - [ ] zkey 文件存 Walrus
 - [ ] 前端（创建/预测/揭示/结算 + 操作详情 + 观察者视角）
-- [ ] Move 测试 19 个 + E2E 测试 3 个
+- [ ] Move 测试 20 个 + E2E 测试 3 个
 - [ ] 更新 README + PROJECT_ANALYSIS.md
 - [ ] 更新 PPT
 
