@@ -1,4 +1,4 @@
-# SuiCryptoLib — 加密价格预测市场 项目规格书 v4.1
+# SuiCryptoLib — 加密价格预测市场 项目规格书 v4.2
 
 ## 变更记录
 
@@ -352,16 +352,30 @@ public fun settle(
 **内部逻辑：**
 1. `assert!(clock::timestamp_ms(clock) >= market.settle_after)` — 可以结算了（ms）
 2. `assert!(!market.settled)` — 未结算过
-3. 从 Pyth PriceInfoObject 读取价格和时间戳
-4. 验证 feed ID 匹配 `market.pyth_price_feed_id`
-5. **验证价格时间戳在窗口内（注意单位转换 ms → s）：**
+3. 从 Pyth PriceInfoObject 读取价格：
+   ```move
+   use pyth::pyth;
+   use pyth::price;
+   use pyth::price_info::PriceInfoObject;
+
+   let price_struct = pyth::get_price(price_info_object, clock);
+   // 或: pyth::get_price_no_older_than(price_info_object, clock, max_age)
    ```
-   let settle_after_secs = market.settle_after / 1000;   // ms → s，向下截断
-   let price_ts = pyth::get_timestamp(&price);            // 已是 seconds
+4. 验证 feed ID 匹配 `market.pyth_price_feed_id`
+5. **验证价格时间戳在窗口内（注意单位 ms → s）：**
+   ```move
+   let settle_after_secs = market.settle_after / 1000;     // ms → s
+   let price_ts = price::get_timestamp(&price_struct);     // seconds (注意: price 模块, 非 pyth 模块)
    assert!(price_ts >= settle_after_secs, EPriceTooEarly);
    assert!(price_ts <= settle_after_secs + market.settle_price_window_secs, EPriceTooStale);
    ```
-6. 价格转换为整数美元（**向下截断**，如 84999.73 → 84999）
+6. 价格转换为整数美元（**向下截断**）：
+   ```move
+   // price::get_price() 返回 pyth::i64::I64 (Pyth 自定义类型, 非 Move 原生)
+   // price::get_expo() 返回 I64 (通常为负数, 如 BTC/USD expo = -8)
+   // 实作者需使用 pyth::i64 模块处理类型转换
+   // 示例: price=8499973000, expo=-8 → $84,999.73 → 截断为 84999
+   ```
 7. **第一次遍历 predictor_addresses 找赢家：**
    ```
    遍历 predictor_addresses (vector)
@@ -422,22 +436,25 @@ actual_price_usd = pyth_price / 10^(-expo)   // 取整数部分
 
 ### Pyth Sui 整合流程
 
+**重要：不要硬编码 `pyth::update_single_price_feed` 调用。** Pyth 官方明确警告：每次 Pyth 合约升级后 package address 会改变，硬编码的 call-site 会失效。必须使用 `SuiPythClient` 自动解析最新 package address。
+
 ```
 前端:
-  1. 调用 Pyth Hermes API: GET /v2/updates/price/latest?ids[]=BTC_USD_FEED_ID
-  2. 获取 VAA (Verified Action Approval) 数据
-  3. PTB:
-     a. pyth::update_single_price_feed(state, vaa, clock)
-     b. market::settle(market, price_info_object, clock)
+  1. 初始化 SuiPythClient(suiClient, pythStateId, wormholeStateId)
+  2. 调用 Hermes API 获取 priceUpdateData
+  3. 构建 Transaction:
+     a. pythClient.updatePriceFeeds(tx, priceUpdateData, priceIDs)
+        // 自动使用最新 Pyth package address，避免升级后失效
+     b. tx.moveCall: market::settle(market, price_info_object, clock)
   4. 钱包签名
 
 链上:
-  1. Pyth 合约验证 VAA (Wormhole guardian 签名)
+  1. Pyth 合约验证价格数据 (Wormhole guardian 签名)
   2. PriceInfoObject 更新为最新价格
   3. market::settle 读取验证后的价格
 ```
 
-**开发前必须确认：** Pyth Sui SDK 的实际 package ID、函数签名、PriceInfoObject 结构。参考 https://docs.pyth.network/price-feeds/use-real-data/sui
+参考：https://docs.pyth.network/price-feeds/use-real-data/sui
 
 ### 测试中的 Mock 策略
 
@@ -500,7 +517,17 @@ const rangeResult = await generateThresholdRangeProof({
 | threshold_range.wasm | ~100 KB |
 | threshold_range_final.zkey | ~5 MB |
 
-上传到 Walrus，前端从 Walrus aggregator URL 加载。具体 URL 格式开发时确认。
+上传到 Walrus，前端从 Walrus aggregator URL 加载：
+
+```javascript
+// Testnet
+const WALRUS_AGGREGATOR = "https://aggregator.walrus-testnet.walrus.space/v1/";
+// Mainnet
+// const WALRUS_AGGREGATOR = "https://aggregator.walrus.space/v1/";
+
+const THRESHOLD_WASM_URL = `${WALRUS_AGGREGATOR}${THRESHOLD_WASM_BLOB_ID}`;
+const THRESHOLD_ZKEY_URL = `${WALRUS_AGGREGATOR}${THRESHOLD_ZKEY_BLOB_ID}`;
+```
 
 ---
 
